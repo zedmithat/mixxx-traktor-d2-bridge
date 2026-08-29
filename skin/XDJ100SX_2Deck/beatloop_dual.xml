@@ -1,0 +1,8 @@
+<Template>
+  <WidgetStack currentpage="[Skin],active_deck" persist="true">
+    <Children>
+      <Template src="skin:beatloop_deck1.xml"/>
+      <WidgetGroup trigger="[Skin],active_deck"><Layout>vertical</Layout><Children><Template src="skin:beatloop_deck2.xml"/></Children></WidgetGroup>
+    </Children>
+  </WidgetStack>
+</Template>
