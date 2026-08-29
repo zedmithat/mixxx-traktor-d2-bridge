@@ -1,0 +1,15 @@
+[Unit]
+Description=Traktor Kontrol D2 display and MIDI bridge
+After=default.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/d2-bridge/device.env
+ExecStart=%h/openAV-Ctlra/build/d2_bridge_metadata
+ExecStartPost=%h/bin/d2-midi-recover.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+

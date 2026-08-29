@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Mixxx D2 Custom
+Comment=Start the custom Mixxx build with D2 display support
+Exec=/home/pi/bin/start-mixxx-d2.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true

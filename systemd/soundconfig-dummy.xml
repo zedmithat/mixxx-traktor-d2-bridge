@@ -1,0 +1,6 @@
+<!DOCTYPE SoundManagerConfig>
+<SoundManagerConfig api="ALSA" deck_count="4" force_network_clock="1" latency="5" samplerate="44100" sync_buffers="2">
+  <SoundDevice name="Dummy: PCM (hw:2,0)" portAudioIndex="0" alsaHwDevice="hw:2,0">
+    <output type="Master" index="0" channel="0" channel_count="2"/>
+  </SoundDevice>
+</SoundManagerConfig>
