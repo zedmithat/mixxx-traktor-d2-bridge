@@ -1,0 +1,19 @@
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1384,5 +1384,15 @@ void WTrackTableView::activateSelectedTrack() {
+ void WTrackTableView::loadSelectedTrackToGroup(const QString& group, bool play) {
+-    const QModelIndexList indices = getSelectedRows();
++    QModelIndexList indices = getSelectedRows();
++    // Controller navigation can leave a valid current index without adding
++    // it to selectedRows() (notably compact/touch skins and freshly populated
++    // USB proxy models). The D2 browse window intentionally follows this same
++    // current index, so use it as the load target when no row selection exists.
++    if (indices.isEmpty()) {
++        const QItemSelectionModel* pSelectionModel = selectionModel();
++        if (pSelectionModel && pSelectionModel->currentIndex().isValid()) {
++            indices.append(pSelectionModel->currentIndex());
++        }
++    }
+     if (indices.isEmpty()) {
+         return;
+     }
