@@ -1,0 +1,15 @@
+build/
+*.o
+*.so
+*.a
+*.log
+*.ppm
+*.tar.gz
+*.bak
+*.new
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+
