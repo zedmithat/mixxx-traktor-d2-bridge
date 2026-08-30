@@ -8,7 +8,7 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 
 ### Traktor D2 player
 
-![Traktor D2 three-band player view](docs/d2-functional-player.png)
+![Live Traktor D2 three-band player framebuffer captured during playback](docs/d2-player-1-framebuffer.png)
 
 ### Traktor D2 browser
 

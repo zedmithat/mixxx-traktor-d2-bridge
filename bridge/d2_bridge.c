@@ -36,6 +36,7 @@
     do { if (D2_VERBOSE) fflush(stdout); } while (0)
 
 static volatile int running = 1;
+static volatile sig_atomic_t d2_capture_requested = 0;
 static snd_seq_t *midi_seq = NULL;
 static int midi_port = -1;
 /* FreeType mutates both FT_Face and glyph slots while measuring/rendering.
@@ -194,6 +195,11 @@ static unsigned d2_render_buffer_index[3] = {0, 0, 0};
 static int d2_render_buffer_ready[3] = {0, 0, 0};
 static uint64_t d2_render_generation[3] = {0, 0, 0};
 static uint64_t d2_usb_generation[3] = {0, 0, 0};
+/* Exact copies of the last complete RGB565 frames handed to libctlra.  These
+ * mirrors are diagnostic-only: capturing never reads from, interrupts or
+ * fragments an in-flight USB transfer. */
+static uint8_t d2_capture_frame[3][WIDTH * HEIGHT * 2];
+static int d2_capture_frame_ready[3] = {0, 0, 0};
 static pthread_mutex_t d2_frame_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t d2_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t d2_render_thread;
@@ -2011,6 +2017,12 @@ static void stop_handler(int sig)
     running = 0;
 }
 
+static void capture_handler(int sig)
+{
+    (void)sig;
+    d2_capture_requested = 1;
+}
+
 /* RGB888 -> RGB565 */
 static inline void rgb565(uint8_t *p, int r, int g, int b)
 {
@@ -3158,6 +3170,60 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
                      28, 52, 1, 245, 62, 48);
 }
 
+static void d2_capture_publish(int player, const uint8_t *pixels)
+{
+    if (player < 1 || player > 2 || !pixels)
+        return;
+    memcpy(d2_capture_frame[player], pixels, WIDTH * HEIGHT * 2);
+    d2_capture_frame_ready[player] = 1;
+}
+
+static int d2_write_rgb565_ppm(const char *path, const uint8_t *pixels)
+{
+    FILE *output = fopen(path, "wb");
+    if (!output)
+        return -1;
+
+    fprintf(output, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
+    for (int i = 0; i < WIDTH * HEIGHT; ++i) {
+        uint16_t color = ((uint16_t)pixels[i * 2] << 8) |
+                         pixels[i * 2 + 1];
+        unsigned char rgb[3] = {
+            (unsigned char)(((color >> 11) & 31) * 255 / 31),
+            (unsigned char)(((color >> 5) & 63) * 255 / 63),
+            (unsigned char)((color & 31) * 255 / 31),
+        };
+        if (fwrite(rgb, 1, sizeof(rgb), output) != sizeof(rgb)) {
+            fclose(output);
+            return -1;
+        }
+    }
+    if (fclose(output) != 0)
+        return -1;
+    return 0;
+}
+
+static void d2_capture_write_requested_frames(void)
+{
+    if (!d2_capture_requested)
+        return;
+    d2_capture_requested = 0;
+
+    for (int player = 1; player <= 2; ++player) {
+        if (!d2_capture_frame_ready[player])
+            continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/d2-player-%d-live.ppm", player);
+        if (d2_write_rgb565_ppm(path, d2_capture_frame[player]) == 0)
+            fprintf(stdout, "D2 CAPTURE PLAYER %d %s\n", player, path);
+        else
+            fprintf(stderr, "D2 CAPTURE FAILED PLAYER %d %s\n",
+                    player, path);
+    }
+    fflush(stdout);
+    fflush(stderr);
+}
+
 /* Render producer: always overwrite the non-published RGB565 buffer.  USB
  * never sees a partially drawn frame because publication is a single index
  * swap under d2_frame_mutex after the complete 480x272 image is ready. */
@@ -3278,6 +3344,7 @@ static int32_t screen_callback(
             unsigned front = d2_render_buffer_index[player];
             memcpy(pixel_data, d2_render_buffer[player][front],
                    WIDTH * HEIGHT * 2);
+            d2_capture_publish(player, pixel_data);
             d2_usb_generation[player] = d2_render_generation[player];
             d2_last_screen_view[player] = D2_VIEW_DECK;
             flush = 1;
@@ -3305,6 +3372,7 @@ static int32_t screen_callback(
         if (browse_notice != D2_BROWSE_NOTICE_NONE)
             d2_draw_browse_notice(back_buffer, browse_notice);
         memcpy(pixel_data, back_buffer, WIDTH * HEIGHT * 2);
+        d2_capture_publish(player, pixel_data);
         d2_render_buffer_index[player] = back;
         d2_browse_rendered_generation[player] = d2_browse_generation;
         d2_browse_frame_valid[player] = 1;
@@ -3332,6 +3400,7 @@ static int32_t screen_callback(
                                            performance_title,
                                            pad_rgb,
                                            accent_r, accent_g, accent_b);
+        d2_capture_publish(player, pixel_data);
         d2_commit_performance_frame(player, &visible);
         return 1;
     }
@@ -5071,6 +5140,7 @@ int main(int argc, char **argv)
 {
     signal(SIGINT, stop_handler);
     signal(SIGTERM, stop_handler);
+    signal(SIGUSR1, capture_handler);
     d2_font_init();
     if (!d2_ft_ready)
         fprintf(stderr, "D2 font: FreeType unavailable; using bitmap fallback\n");
@@ -5234,6 +5304,7 @@ int main(int argc, char **argv)
         pthread_mutex_lock(&d2_state_mutex);
         midi_input_poll();
         pthread_mutex_unlock(&d2_state_mutex);
+        d2_capture_write_requested_frames();
         /* ctlra_idle_iter() also invokes feedback_callback(), which flushes
          * the complete LED report for both D2 units.  Running this at 2 ms
          * produces roughly 1000 HID writes/second and starves the interrupt
