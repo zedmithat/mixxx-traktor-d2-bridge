@@ -18,6 +18,13 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 
 ![Live Mixxx zed two-deck player skin with per-deck FX units](docs/zed-main-screen-live.png)
 
+### D2 hardware in action
+
+<p align="center">
+  <img src="docs/d2-hardware-player-closeup.png" alt="Traktor Kontrol D2 running the custom Nexus player" width="48%">
+  <img src="docs/d2-hardware-full-controls.png" alt="Full Traktor Kontrol D2 hardware and LED feedback" width="48%">
+</p>
+
 ### Zed player FX controls
 
 ![Zed per-deck FX columns](docs/d2-fx-columns-live.png)
