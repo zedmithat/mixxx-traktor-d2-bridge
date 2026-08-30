@@ -1,0 +1,84 @@
+<Template>
+  <WidgetGroup>
+    <ObjectName>DeckFxBar</ObjectName>
+    <Layout>horizontal</Layout>
+    <Size>0me,62f</Size>
+    <Children>
+      <WidgetGroup>
+        <ObjectName>DeckFxIdentity</ObjectName>
+        <Layout>vertical</Layout>
+        <Size>88f,58f</Size>
+        <Children>
+          <Label>
+            <ObjectName>DeckFxTitle</ObjectName>
+            <Size>88f,27f</Size>
+            <Text>FX UNIT <Variable name="unit"/> / <Variable name="deck_label"/></Text>
+          </Label>
+          <PushButton>
+            <ObjectName>DeckFxRoute</ObjectName>
+            <TooltipId>EffectUnit_deck_enabled</TooltipId>
+            <Size>88f,29f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>DECK <Variable name="deck_label"/> OFF</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>DECK <Variable name="deck_label"/> ON</Text>
+            </State>
+            <Connection>
+              <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>],group_[Channel<Variable name="channel"/>]_enable</ConfigKey>
+            </Connection>
+          </PushButton>
+        </Children>
+      </WidgetGroup>
+
+      <WidgetGroup>
+        <ObjectName>DeckFxMix</ObjectName>
+        <Layout>vertical</Layout>
+        <Size>48f,58f</Size>
+        <Children>
+          <Label>
+            <ObjectName>DeckFxMixLabel</ObjectName>
+            <Size>48f,18f</Size>
+            <Text>MIX</Text>
+          </Label>
+          <KnobComposed>
+            <ObjectName>DeckFxMixKnob</ObjectName>
+            <TooltipId>EffectUnit_mix</TooltipId>
+            <Size>40f,38f</Size>
+            <Knob>skin:/icons/fx_knob_indicator.svg</Knob>
+            <BackPath>skin:/icons/fx_knob_bg.svg</BackPath>
+            <MinAngle>-135</MinAngle>
+            <MaxAngle>135</MaxAngle>
+            <KnobCenterYOffset>1.7</KnobCenterYOffset>
+            <ArcRadius>15</ArcRadius>
+            <ArcUnipolar>true</ArcUnipolar>
+            <ArcColor>#00d9ff</ArcColor>
+            <ArcBgColor>#313a43</ArcBgColor>
+            <ArcThickness>2</ArcThickness>
+            <ArcBgThickness>2</ArcBgThickness>
+            <ArcRoundCaps>true</ArcRoundCaps>
+            <Connection>
+              <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>],mix</ConfigKey>
+            </Connection>
+          </KnobComposed>
+        </Children>
+      </WidgetGroup>
+
+      <Template src="skin:deck_fx_slot.xml">
+        <SetVariable name="unit"><Variable name="unit"/></SetVariable>
+        <SetVariable name="effect">1</SetVariable>
+      </Template>
+      <Template src="skin:deck_fx_slot.xml">
+        <SetVariable name="unit"><Variable name="unit"/></SetVariable>
+        <SetVariable name="effect">2</SetVariable>
+      </Template>
+      <Template src="skin:deck_fx_slot.xml">
+        <SetVariable name="unit"><Variable name="unit"/></SetVariable>
+        <SetVariable name="effect">3</SetVariable>
+      </Template>
+    </Children>
+  </WidgetGroup>
+</Template>

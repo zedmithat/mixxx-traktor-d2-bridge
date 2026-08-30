@@ -26,6 +26,9 @@
 #define D2_WAVEFORM_HEIGHT 122
 #define D2_MAX_BEATS 4096
 #define D2_BROWSE_ROWS 9
+#define D2_PHYSICAL_DECKS 2
+#define D2_ASSET_SLOTS 5
+#define D2_LOAD_SCRATCH(deck) ((deck) + D2_PHYSICAL_DECKS)
 #define D2_VERBOSE 0
 #define D2_EVENT_LOG(...) \
     do { if (D2_VERBOSE) fprintf(stdout, __VA_ARGS__); } while (0)
@@ -35,9 +38,13 @@
 static volatile int running = 1;
 static snd_seq_t *midi_seq = NULL;
 static int midi_port = -1;
-static FT_Library d2_ft_library;
-static FT_Face d2_ft_face;
-static int d2_ft_ready = 0;
+/* FreeType mutates both FT_Face and glyph slots while measuring/rendering.
+ * The USB callback runs on the HID owner thread while the animated Deck is
+ * produced on a worker, so every rendering thread owns an independent
+ * FreeType library, face and glyph cache. No font mutex can stall input. */
+static _Thread_local FT_Library d2_ft_library;
+static _Thread_local FT_Face d2_ft_face;
+static _Thread_local int d2_ft_ready = 0;
 
 /* Every HUD glyph is cached once in its native alpha mask.  The live 60 Hz
  * path therefore only alpha-blends pixels; it never asks FreeType to rasterize
@@ -54,9 +61,11 @@ struct d2_cached_glyph {
     int advance;
     int ready;
 };
-static struct d2_cached_glyph d2_font_cache[D2_FONT_SIZES][D2_FONT_CACHE_GLYPHS];
+static _Thread_local struct d2_cached_glyph
+    d2_font_cache[D2_FONT_SIZES][D2_FONT_CACHE_GLYPHS];
 
 struct d2_screen_state {
+    int track_id;
     float bpm;
     float position;
     float remaining;
@@ -67,6 +76,8 @@ struct d2_screen_state {
     float phase_active;
     int phase_master_step;
     int phase_active_step;
+    int phase_master_deck;
+    int phase_follower_deck;
     int phase_valid;
     float beat_prev_position;
     float beat_next_position;
@@ -75,6 +86,7 @@ struct d2_screen_state {
     float beatgrid_interval;
     int beatgrid_ready;
     float beatmap_position[D2_MAX_BEATS];
+    int beatmap_source_index[D2_MAX_BEATS];
     int beatmap_count;
     int beatmap_ready;
     int zoom_level;
@@ -82,40 +94,44 @@ struct d2_screen_state {
     float loop_size;
     int quantize;
     int keylock;
+    int beatgrid_edit;
     int visual_key;
     int fx_touch_mask;
     float fx_parameter[4];
     int fx_enabled[4];
+    int fx_selection[3]; /* Mixxx loaded_effect index, 0 means no effect */
+    char fx_name[3][64]; /* authoritative EffectManifest display names */
     int stem_count;
     float stem_volume[4];
     int stem_muted[4];
     int browse_focus; /* 0 = track list, 1 = library tree */
     float hotcue_position[8];
+    uint32_t hotcue_color[8];
     int playing;
-    int metadata_pending;
     struct timespec position_updated_at;
     char title[80];
     char artist[80];
     char musical_key[16];
+    char location[512];
 };
 
-static struct d2_screen_state d2_screen_state[3] = {
+static struct d2_screen_state d2_screen_state[D2_ASSET_SLOTS] = {
     {0},
-    {.bpm = 128.0f, .position = 0.38f, .rate = 1.0f, .zoom_level = 2,
+    {.rate = 1.0f, .zoom_level = 2,
      .loop_size = 4.0f,
      .stem_volume = {1,1,1,1}, .title = "DECK 1", .artist = "MIXXX",
      .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1}},
-    {.bpm = 128.0f, .position = 0.38f, .rate = 1.0f, .zoom_level = 2,
+    {.rate = 1.0f, .zoom_level = 2,
      .loop_size = 4.0f,
      .stem_volume = {1,1,1,1}, .title = "DECK 2", .artist = "MIXXX",
      .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1}},
 };
-static float d2_metadata_duration[3] = {0.0f, 0.0f, 0.0f};
-/* FX touch is a transient overlay.  This timestamp is a safety net for
- * controllers that omit the note-off/release packet. */
+/* Individual FX touch masks are transient; 0x0f is the deliberate persistent
+ * FX Settings view opened by FX SELECT and closes on the next press. */
 static uint64_t d2_fx_touch_updated_us[3] = {0, 0, 0};
 
 struct d2_led_state {
+    int outputs_enabled;
     int play;
     int cue;
     int sync;
@@ -133,9 +149,9 @@ struct d2_led_state {
 
 static struct d2_led_state d2_led_state[3] = {
     {0},
-    {.active_channel = 1, .mode = 1, .fx_unit = 1,
+    {.outputs_enabled = 1, .active_channel = 1, .mode = 1, .fx_unit = 1,
      .performance_on = {1, 1, 1, 1}},
-    {.active_channel = 2, .mode = 1, .fx_unit = 2,
+    {.outputs_enabled = 1, .active_channel = 2, .mode = 1, .fx_unit = 2,
      .performance_on = {1, 1, 1, 1}},
 };
 
@@ -146,19 +162,31 @@ static uint64_t d2_monotonic_us(void)
     return (uint64_t)ts.tv_sec * 1000000ULL +
            (uint64_t)ts.tv_nsec / 1000ULL;
 }
-/* Real amplitude summaries, generated from the loaded audio file. */
-static uint8_t d2_waveform[3][D2_WAVEFORM_POINTS];
-static uint8_t d2_waveform_low[3][D2_WAVEFORM_POINTS];
-static uint8_t d2_waveform_mid[3][D2_WAVEFORM_POINTS];
-static uint8_t d2_waveform_high[3][D2_WAVEFORM_POINTS];
-static int d2_waveform_ready[3] = {0, 0, 0};
-/* Pre-rasterized row-major RGB565 waveform layers. Each loaded deck owns a
- * 8192-pixel strip; a playing frame copies a 426-pixel window per row. */
-static uint8_t d2_wave_strip[3][D2_WAVEFORM_HEIGHT]
-                            [D2_WAVEFORM_POINTS * 2];
-static int d2_wave_strip_ready[3] = {0, 0, 0};
-static uint8_t d2_cover_art[3][48 * 48 * 2];
-static int d2_cover_art_ready[3] = {0, 0, 0};
+/* Immutable track assets are built off-thread and published as one pointer.
+ * Compatibility pointers keep the renderer compact while each worker writes
+ * only to its private scratch slot. */
+struct d2_track_assets {
+    uint8_t waveform[D2_WAVEFORM_POINTS];
+    uint8_t waveform_low[D2_WAVEFORM_POINTS];
+    uint8_t waveform_mid[D2_WAVEFORM_POINTS];
+    uint8_t waveform_high[D2_WAVEFORM_POINTS];
+    uint8_t wave_strip[D2_WAVEFORM_HEIGHT][D2_WAVEFORM_POINTS * 2];
+    uint8_t cover_art[48 * 48 * 2];
+    int waveform_ready;
+    int wave_strip_ready;
+    int cover_art_ready;
+};
+
+static struct d2_track_assets *d2_track_assets[3] = {NULL, NULL, NULL};
+static uint8_t *d2_waveform[D2_ASSET_SLOTS] = {NULL};
+static uint8_t *d2_waveform_low[D2_ASSET_SLOTS] = {NULL};
+static uint8_t *d2_waveform_mid[D2_ASSET_SLOTS] = {NULL};
+static uint8_t *d2_waveform_high[D2_ASSET_SLOTS] = {NULL};
+static uint8_t (*d2_wave_strip[D2_ASSET_SLOTS])[D2_WAVEFORM_POINTS * 2] = {NULL};
+static uint8_t *d2_cover_art[D2_ASSET_SLOTS] = {NULL};
+static int d2_waveform_ready[D2_ASSET_SLOTS] = {0};
+static int d2_wave_strip_ready[D2_ASSET_SLOTS] = {0};
+static int d2_cover_art_ready[D2_ASSET_SLOTS] = {0};
 /* Two native RGB565 framebuffers per physical display. The compositor never
  * draws into a buffer that is being copied to libctlra's USB transfer frame. */
 static uint8_t d2_render_buffer[3][2][WIDTH * HEIGHT * 2];
@@ -170,6 +198,62 @@ static pthread_mutex_t d2_frame_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t d2_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t d2_render_thread;
 static int d2_render_thread_started = 0;
+
+struct d2_track_load_job {
+    int pending;
+    int deck;
+    int track_id;
+    float duration;
+    uint64_t generation;
+    char location[512];
+};
+
+static struct d2_track_load_job d2_track_load_job[3];
+static uint64_t d2_track_generation[3] = {0, 0, 0};
+static pthread_mutex_t d2_track_load_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t d2_track_load_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t d2_track_load_thread[3];
+static int d2_track_load_thread_started[3] = {0, 0, 0};
+static int d2_track_load_stop = 0;
+
+static void d2_bind_asset_slot(int slot, struct d2_track_assets *assets)
+{
+    if (slot < 0 || slot >= D2_ASSET_SLOTS)
+        return;
+    d2_waveform[slot] = assets ? assets->waveform : NULL;
+    d2_waveform_low[slot] = assets ? assets->waveform_low : NULL;
+    d2_waveform_mid[slot] = assets ? assets->waveform_mid : NULL;
+    d2_waveform_high[slot] = assets ? assets->waveform_high : NULL;
+    d2_wave_strip[slot] = assets ? assets->wave_strip : NULL;
+    d2_cover_art[slot] = assets ? assets->cover_art : NULL;
+    d2_waveform_ready[slot] = assets ? assets->waveform_ready : 0;
+    d2_wave_strip_ready[slot] = assets ? assets->wave_strip_ready : 0;
+    d2_cover_art_ready[slot] = assets ? assets->cover_art_ready : 0;
+}
+
+static void d2_copy_text(char *destination, size_t destination_size,
+                         const char *source)
+{
+    if (!destination || destination_size == 0)
+        return;
+    if (!source)
+        source = "";
+    size_t length = strnlen(source, destination_size - 1);
+    memmove(destination, source, length);
+    destination[length] = '\0';
+}
+
+static void d2_visible_deck_title(char *destination, size_t destination_size,
+                                  const char *source)
+{
+    d2_copy_text(destination, destination_size, source);
+    char *mix_suffix = strpbrk(destination, "([{");
+    if (mix_suffix)
+        *mix_suffix = '\0';
+    size_t title_length = strlen(destination);
+    while (title_length > 0 && destination[title_length - 1] == ' ')
+        destination[--title_length] = '\0';
+}
 struct d2_browse_entry {
     int track_id;
     char title[80];
@@ -203,11 +287,99 @@ static uint64_t d2_browse_generation = 1;
 static uint64_t d2_browse_rendered_generation[3] = {0, 0, 0};
 static int d2_browse_frame_valid[3] = {0, 0, 0};
 
+/* A loaded TrackPointer may briefly have no library ID (notably restored and
+ * file-browser loads).  Mixxx then sends its exact location in 7-bit-safe
+ * chunks.  Keep assembly separate per physical deck so simultaneous loads
+ * cannot cross-contaminate one another. */
+#define D2_ENCODED_LOCATION_MAX 2048
+static char d2_encoded_location[3][D2_ENCODED_LOCATION_MAX];
+static size_t d2_encoded_location_length[3] = {0, 0, 0};
+static int d2_encoded_location_valid[3] = {0, 0, 0};
+
 static void d2_browse_mark_dirty(void)
 {
     ++d2_browse_generation;
     if (d2_browse_generation == 0)
         d2_browse_generation = 1;
+}
+
+static int d2_hex_value(char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    return -1;
+}
+
+static int d2_percent_decode(const char *source, char *destination,
+                             size_t destination_size)
+{
+    size_t in = 0;
+    size_t out = 0;
+
+    if (!source || !destination || destination_size == 0)
+        return 0;
+    while (source[in] != '\0') {
+        unsigned char decoded;
+        if (source[in] == '%') {
+            int high = d2_hex_value(source[in + 1]);
+            int low = high >= 0 ? d2_hex_value(source[in + 2]) : -1;
+            if (high < 0 || low < 0)
+                return 0;
+            decoded = (unsigned char)((high << 4) | low);
+            in += 3;
+        } else {
+            decoded = (unsigned char)source[in++];
+        }
+        if (decoded == '\0' || out + 1 >= destination_size)
+            return 0;
+        destination[out++] = (char)decoded;
+    }
+    destination[out] = '\0';
+    return out > 0;
+}
+
+static int d2_valid_utf8(const char *text)
+{
+    const unsigned char *cursor = (const unsigned char *)text;
+
+    if (!text)
+        return 0;
+    while (*cursor) {
+        uint32_t codepoint;
+        size_t continuation;
+        if (*cursor < 0x80) {
+            ++cursor;
+            continue;
+        } else if ((*cursor & 0xe0) == 0xc0) {
+            codepoint = *cursor & 0x1f;
+            continuation = 1;
+            if (codepoint < 2)
+                return 0; /* overlong ASCII */
+        } else if ((*cursor & 0xf0) == 0xe0) {
+            codepoint = *cursor & 0x0f;
+            continuation = 2;
+        } else if ((*cursor & 0xf8) == 0xf0) {
+            codepoint = *cursor & 0x07;
+            continuation = 3;
+        } else {
+            return 0;
+        }
+        ++cursor;
+        for (size_t index = 0; index < continuation; ++index) {
+            if ((cursor[index] & 0xc0) != 0x80)
+                return 0;
+            codepoint = (codepoint << 6) | (cursor[index] & 0x3f);
+        }
+        if ((continuation == 2 && codepoint < 0x800) ||
+            (continuation == 3 && codepoint < 0x10000) ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
+            codepoint > 0x10ffff) {
+            return 0;
+        }
+        cursor += continuation;
+    }
+    return 1;
 }
 
 struct d2_library_browse_state {
@@ -244,9 +416,203 @@ enum d2_screen_view {
 static enum d2_screen_view d2_screen_view[3] = {
     D2_VIEW_DECK, D2_VIEW_DECK, D2_VIEW_DECK,
 };
+struct d2_performance_visible_state {
+    enum d2_screen_view view;
+    char title[80];
+    uint32_t pad_rgb[8];
+};
+/* The display controller retains the last complete frame.  Record exactly
+ * what was last submitted so static Browser/Performance surfaces do not
+ * consume USB bandwidth by retransmitting an identical 480x272 image.  A
+ * view is committed only after its complete frame is in libctlra's transfer
+ * buffer; returning from another surface therefore always redraws. */
+static int d2_last_screen_view[3] = {-1, -1, -1};
+static struct d2_performance_visible_state d2_performance_frame[3];
+static int d2_performance_frame_valid[3] = {0, 0, 0};
+
+/* Load policy and file validation remain authoritative in Mixxx.  The bridge
+ * only displays the exact outcome as a short per-D2 Browse notice. */
+#define D2_BROWSE_NOTICE_US 2000000ULL
+enum d2_browse_notice_kind {
+    D2_BROWSE_NOTICE_NONE = 0,
+    D2_BROWSE_NOTICE_DECK_PLAYING,
+    D2_BROWSE_NOTICE_TRACK_MISSING,
+    D2_BROWSE_NOTICE_NO_SELECTION,
+    D2_BROWSE_NOTICE_LOAD_FAILED,
+};
+static enum d2_browse_notice_kind d2_browse_notice_kind[3] = {
+    D2_BROWSE_NOTICE_NONE, D2_BROWSE_NOTICE_NONE, D2_BROWSE_NOTICE_NONE,
+};
+static uint64_t d2_browse_notice_until_us[3] = {0, 0, 0};
+
+static void d2_set_browse_notice(int player,
+                                 enum d2_browse_notice_kind kind,
+                                 uint64_t now_us)
+{
+    if (player < 1 || player > 2 || kind == D2_BROWSE_NOTICE_NONE)
+        return;
+    d2_browse_notice_kind[player] = kind;
+    d2_browse_notice_until_us[player] = now_us + D2_BROWSE_NOTICE_US;
+    d2_browse_mark_dirty();
+}
+
+static void d2_clear_browse_notice(int player)
+{
+    if (player < 1 || player > 2 ||
+        d2_browse_notice_kind[player] == D2_BROWSE_NOTICE_NONE)
+        return;
+    d2_browse_notice_kind[player] = D2_BROWSE_NOTICE_NONE;
+    d2_browse_notice_until_us[player] = 0;
+    d2_browse_mark_dirty();
+}
+
+static enum d2_browse_notice_kind d2_active_browse_notice(
+        int player, uint64_t now_us)
+{
+    if (player < 1 || player > 2 ||
+        d2_browse_notice_kind[player] == D2_BROWSE_NOTICE_NONE)
+        return D2_BROWSE_NOTICE_NONE;
+    if (now_us >= d2_browse_notice_until_us[player]) {
+        d2_browse_notice_kind[player] = D2_BROWSE_NOTICE_NONE;
+        d2_browse_notice_until_us[player] = 0;
+        d2_browse_mark_dirty();
+        return D2_BROWSE_NOTICE_NONE;
+    }
+    return d2_browse_notice_kind[player];
+}
 static const char *d2_pad_labels[8] = {
     "1", "2", "3", "4", "5", "6", "7", "8",
 };
+static const char *const d2_loop_pad_labels[8] = {
+    "1/4", "1/2", "1", "2", "4", "8", "16", "32",
+};
+static const char *const d2_beatjump_pad_labels[8] = {
+    "-1", "+1", "-4", "+4", "-8", "+8", "-16", "+16",
+};
+
+static const char *d2_performance_pad_label(enum d2_screen_view view, int pad)
+{
+    if (pad < 0 || pad >= 8)
+        return "";
+    if (view == D2_VIEW_BEATJUMP)
+        return d2_beatjump_pad_labels[pad];
+    if (view == D2_VIEW_LOOP || view == D2_VIEW_FREEZE)
+        return d2_loop_pad_labels[pad];
+    return d2_pad_labels[pad];
+}
+
+static int d2_is_performance_view(enum d2_screen_view view)
+{
+    return view == D2_VIEW_HOTCUE || view == D2_VIEW_LOOP ||
+           view == D2_VIEW_SAMPLER || view == D2_VIEW_FREEZE ||
+           view == D2_VIEW_BEATJUMP;
+}
+
+static int d2_view_has_dedicated_compositor(enum d2_screen_view view)
+{
+    return view == D2_VIEW_DECK || view == D2_VIEW_BROWSE ||
+           d2_is_performance_view(view);
+}
+
+static const char *d2_performance_heading(enum d2_screen_view view)
+{
+    switch (view) {
+    case D2_VIEW_HOTCUE: return "HOTCUE";
+    case D2_VIEW_LOOP: return "LOOP";
+    case D2_VIEW_SAMPLER: return "SAMPLER";
+    case D2_VIEW_FREEZE: return "FREEZE";
+    case D2_VIEW_BEATJUMP: return "BEATJUMP";
+    default: return "PERFORMANCE";
+    }
+}
+
+static const char *d2_performance_instruction(enum d2_screen_view view)
+{
+    switch (view) {
+    case D2_VIEW_HOTCUE: return "PRESS PAD: HOT CUE";
+    case D2_VIEW_LOOP: return "TOGGLE PAD: LOOP SIZE";
+    case D2_VIEW_SAMPLER: return "PRESS PAD: PLAY SAMPLE";
+    case D2_VIEW_FREEZE: return "HOLD PAD: BEAT ROLL";
+    case D2_VIEW_BEATJUMP: return "PRESS PAD: BEAT JUMP";
+    default: return "";
+    }
+}
+
+static void d2_make_performance_visible_state(
+        struct d2_performance_visible_state *visible,
+        enum d2_screen_view view, const char *deck_title,
+        const uint32_t pad_rgb[8])
+{
+    if (!visible)
+        return;
+    memset(visible, 0, sizeof(*visible));
+    visible->view = view;
+    d2_copy_text(visible->title, sizeof(visible->title), deck_title);
+    for (int pad = 0; pad < 8; ++pad) {
+        visible->pad_rgb[pad] =
+            pad_rgb ? pad_rgb[pad] & 0x00ffffffU : 0;
+    }
+}
+
+static int d2_performance_visible_equal(
+        const struct d2_performance_visible_state *left,
+        const struct d2_performance_visible_state *right)
+{
+    return left && right && left->view == right->view &&
+           strcmp(left->title, right->title) == 0 &&
+           memcmp(left->pad_rgb, right->pad_rgb,
+                  sizeof(left->pad_rgb)) == 0;
+}
+
+static int d2_performance_frame_is_current(
+        int player, const struct d2_performance_visible_state *visible)
+{
+    if (player < 1 || player > 2 || !visible)
+        return 0;
+    return d2_performance_frame_valid[player] &&
+           d2_last_screen_view[player] == (int)visible->view &&
+           d2_performance_visible_equal(
+               &d2_performance_frame[player], visible);
+}
+
+static void d2_commit_performance_frame(
+        int player, const struct d2_performance_visible_state *visible)
+{
+    if (player < 1 || player > 2 || !visible)
+        return;
+    d2_performance_frame[player] = *visible;
+    d2_performance_frame_valid[player] = 1;
+    d2_last_screen_view[player] = (int)visible->view;
+}
+
+static int d2_browse_frame_is_current(int player)
+{
+    if (player < 1 || player > 2)
+        return 0;
+    return d2_browse_frame_valid[player] &&
+           d2_browse_rendered_generation[player] == d2_browse_generation &&
+           d2_last_screen_view[player] == D2_VIEW_BROWSE;
+}
+
+static int d2_try_performance_snapshot(
+        int player, char *deck_title, size_t deck_title_size,
+        uint32_t pad_rgb[8])
+{
+    if (player < 1 || player > 2 || !deck_title ||
+        deck_title_size == 0 || !pad_rgb)
+        return 0;
+    /* ctlra_idle_iter() owns HID polling and calls screen_callback(). Never
+     * let a display snapshot wait behind the other deck's full render. A
+     * busy lock simply defers this static frame to the next 33 ms callback. */
+    if (pthread_mutex_trylock(&d2_state_mutex) != 0)
+        return 0;
+    d2_visible_deck_title(deck_title, deck_title_size,
+                          d2_screen_state[player].title);
+    memcpy(pad_rgb, d2_led_state[player].pad_rgb,
+           sizeof(d2_led_state[player].pad_rgb));
+    pthread_mutex_unlock(&d2_state_mutex);
+    return 1;
+}
 
 static int d2_shell_quote(char *output, size_t output_size, const char *input)
 {
@@ -278,25 +644,25 @@ static void d2_load_cover_art(int deck, const char *location)
     char quoted_location[2048];
     char command[2600];
     FILE *pipe;
-    if (deck < 1 || deck > 2 || !location || !location[0])
+    if (deck < 0 || deck >= D2_ASSET_SLOTS || !d2_cover_art[deck] ||
+        !location || !location[0])
         return;
     d2_cover_art_ready[deck] = 0;
-    memset(d2_cover_art[deck], 0, sizeof(d2_cover_art[deck]));
+    memset(d2_cover_art[deck], 0, 48 * 48 * 2);
     if (!d2_shell_quote(quoted_location, sizeof(quoted_location), location))
         return;
     snprintf(command, sizeof(command),
              "ffmpeg -nostdin -v error -i %s -an "
-             "-vf scale=48:48:force_original_aspect_ratio=decrease," 
-             "pad=48:48:(ow-iw)/2:(oh-ih)/2 -frames:v 1 "
+             "-vf 'scale=48:48:force_original_aspect_ratio=decrease,"
+             "pad=48:48:(ow-iw)/2:(oh-ih)/2' -frames:v 1 "
              "-f rawvideo -pix_fmt rgb565be - 2>/dev/null",
              quoted_location);
     pipe = popen(command, "r");
     if (!pipe)
         return;
-    size_t bytes = fread(d2_cover_art[deck], 1,
-                         sizeof(d2_cover_art[deck]), pipe);
+    size_t bytes = fread(d2_cover_art[deck], 1, 48 * 48 * 2, pipe);
     int status = pclose(pipe);
-    if (status == 0 && bytes == sizeof(d2_cover_art[deck]))
+    if (status == 0 && bytes == 48 * 48 * 2)
         d2_cover_art_ready[deck] = 1;
 }
 
@@ -308,7 +674,9 @@ static int d2_load_mixxx_waveform(int deck, int analysis_id)
     char command[256];
     FILE *pipe;
 
-    if (deck < 1 || deck > 2 || analysis_id <= 0)
+    if (deck < 0 || deck >= D2_ASSET_SLOTS || !d2_waveform[deck] ||
+        !d2_waveform_low[deck] || !d2_waveform_mid[deck] ||
+        !d2_waveform_high[deck] || analysis_id <= 0)
         return 0;
     snprintf(command, sizeof(command),
              "/home/pi/openAV-Ctlra/build/d2_waveform_extract "
@@ -342,19 +710,29 @@ static void d2_build_wave_strip(int deck);
 static void d2_load_mixxx_beatgrid(int deck, int track_id, float duration)
 {
     char command[160];
+    const char *helper_path;
     char mode[8] = "";
     FILE *pipe;
     int first_frame = -1;
     double sample_rate = 0.0;
     double bpm = 0.0;
+    float parsed_map_position[D2_MAX_BEATS];
+    int parsed_map_source_index[D2_MAX_BEATS];
+    int parsed_map_count = 0;
+    int parsed_grid = 0;
+    int parsed_map = 0;
+    float parsed_grid_first = 0.0f;
+    float parsed_grid_interval = 0.0f;
 
-    if (deck < 1 || deck > 2 || track_id <= 0 || duration <= 1.0f)
+    if (deck < 0 || deck >= D2_ASSET_SLOTS ||
+        track_id <= 0 || duration <= 1.0f)
         return;
-    d2_screen_state[deck].beatgrid_ready = 0;
-    d2_screen_state[deck].beatmap_ready = 0;
-    d2_screen_state[deck].beatmap_count = 0;
+    helper_path = getenv("D2_BEATGRID_HELPER");
+    if (!helper_path || helper_path[0] != '/' || strlen(helper_path) > 120 ||
+        strpbrk(helper_path, " \t\r\n'\"`$;&|<>") != NULL)
+        helper_path = "/home/pi/openAV-Ctlra/build/d2_beatgrid_extract";
     snprintf(command, sizeof(command),
-             "/home/pi/openAV-Ctlra/build/d2_beatgrid_extract %d", track_id);
+             "%s %d", helper_path, track_id);
     pipe = popen(command, "r");
     if (!pipe)
         return;
@@ -364,41 +742,80 @@ static void d2_load_mixxx_beatgrid(int deck, int track_id, float duration)
     }
     if (strcmp(mode, "GRID") == 0 &&
         fscanf(pipe, "%d %lf %lf", &first_frame, &sample_rate, &bpm) == 3 &&
-        first_frame >= 0 && sample_rate > 0.0 && bpm >= 20.0 && bpm <= 400.0) {
+        sample_rate > 0.0 && isfinite(sample_rate) &&
+        bpm >= 20.0 && bpm <= 400.0 && isfinite(bpm)) {
         float first_position = (float)(first_frame / (sample_rate * duration));
         float interval = 60.0f / ((float)bpm * duration);
         if (first_position >= -0.25f && first_position <= 1.0f &&
-            interval > 0.0f && interval <= 1.0f) {
-            d2_screen_state[deck].beatgrid_first_position = first_position;
-            d2_screen_state[deck].beatgrid_interval = interval;
-            d2_screen_state[deck].beatgrid_ready = 1;
-            printf("D2 BEATGRID: deck=%d first=%.6f interval=%.8f bpm=%.3f\n",
-                   deck, first_position, interval, bpm);
+            interval > 0.0f && interval <= 1.0f &&
+            isfinite(first_position) && isfinite(interval)) {
+            parsed_grid_first = first_position;
+            parsed_grid_interval = interval;
+            parsed_grid = 1;
         }
     } else if (strcmp(mode, "MAP") == 0) {
         int source_count = 0;
         if (fscanf(pipe, "%d %lf", &source_count, &sample_rate) == 2 &&
-            source_count > 0 && sample_rate > 0.0) {
-            int stored = 0;
+            source_count >= 2 && source_count <= 1000000 &&
+            sample_rate > 0.0 && isfinite(sample_rate)) {
+            int valid = source_count <= D2_MAX_BEATS;
+            int previous_frame = 0;
             for (int i = 0; i < source_count; ++i) {
-                int frame = -1;
-                if (fscanf(pipe, "%d", &frame) != 1)
+                int frame = 0;
+                if (fscanf(pipe, "%d", &frame) != 1) {
+                    valid = 0;
                     break;
-                if (frame >= 0 && stored < D2_MAX_BEATS)
-                    d2_screen_state[deck].beatmap_position[stored++] =
-                        (float)(frame / (sample_rate * duration));
+                }
+                /* Mixxx treats negative finite FramePos values as valid
+                 * lead-in markers and imports every BeatMap entry regardless
+                 * of its legacy enabled flag.  Never use -1 as a sentinel or
+                 * compress the list: either operation changes the source beat
+                 * index and therefore any future bar-anchor calculation. */
+                if (i > 0 && frame <= previous_frame) {
+                    valid = 0;
+                }
+                float position = (float)(frame / (sample_rate * duration));
+                if (!isfinite(position)) {
+                    valid = 0;
+                }
+                if (i < D2_MAX_BEATS) {
+                    parsed_map_position[i] = position;
+                    parsed_map_source_index[i] = i;
+                }
+                previous_frame = frame;
             }
-            d2_screen_state[deck].beatmap_count = stored;
-            d2_screen_state[deck].beatmap_ready = stored > 1;
-            printf("D2 BEATMAP: deck=%d beats=%d source=%d\n",
-                   deck, stored, source_count);
+            if (valid) {
+                parsed_map_count = source_count;
+                parsed_map = 1;
+            }
         }
     }
     int exit_status = pclose(pipe);
-    if (exit_status != 0) {
-        d2_screen_state[deck].beatgrid_ready = 0;
+    if (exit_status == 0 && parsed_grid) {
+        d2_screen_state[deck].beatgrid_first_position = parsed_grid_first;
+        d2_screen_state[deck].beatgrid_interval = parsed_grid_interval;
+        d2_screen_state[deck].beatgrid_ready = 1;
         d2_screen_state[deck].beatmap_ready = 0;
         d2_screen_state[deck].beatmap_count = 0;
+        printf("D2 BEATGRID: deck=%d first=%.6f interval=%.8f bpm=%.3f\n",
+               deck, parsed_grid_first, parsed_grid_interval, bpm);
+    } else if (exit_status == 0 && parsed_map) {
+        memcpy(d2_screen_state[deck].beatmap_position,
+               parsed_map_position,
+               (size_t)parsed_map_count * sizeof(parsed_map_position[0]));
+        memcpy(d2_screen_state[deck].beatmap_source_index,
+               parsed_map_source_index,
+               (size_t)parsed_map_count * sizeof(parsed_map_source_index[0]));
+        d2_screen_state[deck].beatmap_count = parsed_map_count;
+        d2_screen_state[deck].beatmap_ready = 1;
+        d2_screen_state[deck].beatgrid_ready = 0;
+        printf("D2 BEATMAP: deck=%d beats=%d\n", deck, parsed_map_count);
+    } else {
+        /* Commit only a fully decoded helper response.  The track-identity
+         * transition already cleared stale beat state; a transient helper
+         * failure must never publish a partial map to the render thread. */
+        printf("D2 BEAT DATA: deck=%d track_id=%d unavailable\n",
+               deck, track_id);
     }
     fflush(stdout);
 }
@@ -448,16 +865,19 @@ static void d2_load_real_waveform(int deck, const char *location, float duration
     size_t sample_offset = 0;
     float maximum = 0.0f;
 
-    if (deck < 1 || deck > 2 || !location || !*location || duration <= 0.0f)
+    if (deck < 0 || deck >= D2_ASSET_SLOTS || !d2_waveform[deck] ||
+        !d2_waveform_low[deck] || !d2_waveform_mid[deck] ||
+        !d2_waveform_high[deck] || !location || !*location ||
+        duration <= 0.0f)
         return;
     d2_waveform_ready[deck] = 0;
-    memset(d2_waveform[deck], 0, sizeof(d2_waveform[deck]));
+    memset(d2_waveform[deck], 0, D2_WAVEFORM_POINTS);
     /* A failed/unfinished Mixxx analysis must not inherit the previous
      * track's filtered bands.  Stale low/mid/high arrays were responsible
      * for artificial repeated shapes when the raw fallback was used. */
-    memset(d2_waveform_low[deck], 0, sizeof(d2_waveform_low[deck]));
-    memset(d2_waveform_mid[deck], 0, sizeof(d2_waveform_mid[deck]));
-    memset(d2_waveform_high[deck], 0, sizeof(d2_waveform_high[deck]));
+    memset(d2_waveform_low[deck], 0, D2_WAVEFORM_POINTS);
+    memset(d2_waveform_mid[deck], 0, D2_WAVEFORM_POINTS);
+    memset(d2_waveform_high[deck], 0, D2_WAVEFORM_POINTS);
     if (!d2_shell_quote(quoted_location, sizeof(quoted_location), location))
         return;
     snprintf(command, sizeof(command),
@@ -503,50 +923,78 @@ static void d2_load_real_waveform(int deck, const char *location, float duration
     fflush(stdout);
 }
 
-/*
- * Controller scripts expose numeric deck controls but not track strings.
- * The live position and remaining time yield the loaded track duration,
- * which uniquely identifies the correct library record for each deck.
- */
-static void d2_load_duration_metadata(int deck, float duration)
+static int d2_resolve_track_id_by_location(const char *location)
+{
+    static const char sql[] =
+        "SELECT l.id FROM library l "
+        "JOIN track_locations tl ON tl.id = l.location "
+        "WHERE tl.location = ? AND l.mixxx_deleted = 0 "
+        "ORDER BY l.id DESC LIMIT 1";
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int track_id = 0;
+
+    if (!location || location[0] == '\0')
+        return 0;
+    if (sqlite3_open_v2("/home/pi/.mixxx/mixxxdb.sqlite", &db,
+                        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+        goto done;
+    sqlite3_busy_timeout(db, 150);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        goto done;
+    sqlite3_bind_text(stmt, 1, location, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        track_id = sqlite3_column_int(stmt, 0);
+
+done:
+    if (stmt)
+        sqlite3_finalize(stmt);
+    if (db)
+        sqlite3_close(db);
+    return track_id > 0 ? track_id : 0;
+}
+
+/* Resolve all immutable track data from the exact database identity exported
+ * by Mixxx's EngineBuffer.  Duration is only a rendering measurement; it must
+ * never be used as an identity because different tracks routinely share the
+ * same rounded length. */
+static int d2_load_track_metadata(int deck, int track_id, float duration)
 {
     static const char sql[] =
         "SELECT l.artist, l.title, l.key, l.duration, tl.location, "
         "(SELECT id FROM track_analysis "
         " WHERE track_id = l.id AND type = '1' ORDER BY id DESC LIMIT 1) "
-        ", l.id "
         "FROM library l "
         "JOIN track_locations tl ON tl.id = l.location "
-        "WHERE l.mixxx_deleted = 0 "
-        "ORDER BY ABS(l.duration - ?) ASC LIMIT 1";
+        "WHERE l.id = ? AND l.mixxx_deleted = 0 LIMIT 1";
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
+    int loaded = 0;
+
+    if (deck < 0 || deck >= D2_ASSET_SLOTS || track_id <= 0)
+        return 0;
 
     if (sqlite3_open_v2("/home/pi/.mixxx/mixxxdb.sqlite", &db,
                         SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        fprintf(stderr, "D2 metadata: cannot open Mixxx database\\n");
+        fprintf(stderr, "D2 metadata: cannot open Mixxx database\n");
         goto done;
     }
+    sqlite3_busy_timeout(db, 150);
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr, "D2 metadata: query preparation failed: %s\\n",
+        fprintf(stderr, "D2 metadata: query preparation failed: %s\n",
                 sqlite3_errmsg(db));
         goto done;
     }
-    sqlite3_bind_double(stmt, 1, duration);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    sqlite3_bind_int(stmt, 1, track_id);
+    int step_result = sqlite3_step(stmt);
+    if (step_result == SQLITE_ROW) {
         const unsigned char *artist = sqlite3_column_text(stmt, 0);
         const unsigned char *title = sqlite3_column_text(stmt, 1);
         const unsigned char *musical_key = sqlite3_column_text(stmt, 2);
-        float matched_duration = (float)sqlite3_column_double(stmt, 3);
+        float database_duration = (float)sqlite3_column_double(stmt, 3);
         const unsigned char *location = sqlite3_column_text(stmt, 4);
         int waveform_analysis_id = sqlite3_column_int(stmt, 5);
-        int track_id = sqlite3_column_int(stmt, 6);
-        if (fabsf(matched_duration - duration) > 0.25f) {
-            printf("D2 metadata: no duration match deck=%d duration=%.3f\\n",
-                   deck, duration);
-            fflush(stdout);
-            goto done;
-        }
+        float render_duration = duration > 1.0f ? duration : database_duration;
         snprintf(d2_screen_state[deck].artist,
                  sizeof(d2_screen_state[deck].artist), "%s",
                  artist ? (const char *)artist : "");
@@ -556,20 +1004,29 @@ static void d2_load_duration_metadata(int deck, float duration)
         snprintf(d2_screen_state[deck].musical_key,
                  sizeof(d2_screen_state[deck].musical_key), "%s",
                  musical_key ? (const char *)musical_key : "--");
-        d2_metadata_duration[deck] = matched_duration;
+        snprintf(d2_screen_state[deck].location,
+                 sizeof(d2_screen_state[deck].location), "%s",
+                 location ? (const char *)location : "");
         if (!d2_load_mixxx_waveform(deck, waveform_analysis_id)) {
             d2_load_real_waveform(deck,
-                                  location ? (const char *)location : "",
-                                  matched_duration);
+                                  d2_screen_state[deck].location,
+                                  render_duration);
         }
         if (d2_waveform_ready[deck])
             d2_build_wave_strip(deck);
-        d2_load_cover_art(deck, location ? (const char *)location : "");
-        d2_load_mixxx_beatgrid(deck, track_id, matched_duration);
-        printf("D2 METADATA: deck=%d duration=%.3f artist=%s title=%s\\n",
-               deck, matched_duration, d2_screen_state[deck].artist,
+        d2_load_cover_art(deck, d2_screen_state[deck].location);
+        d2_load_mixxx_beatgrid(deck, track_id, render_duration);
+        printf("D2 METADATA: deck=%d track_id=%d location=%s "
+               "duration=%.3f artist=%s title=%s\n",
+               deck, track_id, d2_screen_state[deck].location,
+               render_duration, d2_screen_state[deck].artist,
                d2_screen_state[deck].title);
         fflush(stdout);
+        loaded = 1;
+    } else {
+        fprintf(stderr,
+                "D2 metadata: track_id=%d unavailable for deck=%d rc=%d %s\n",
+                track_id, deck, step_result, sqlite3_errmsg(db));
     }
 
 done:
@@ -577,6 +1034,261 @@ done:
         sqlite3_finalize(stmt);
     if (db)
         sqlite3_close(db);
+    return loaded;
+}
+
+static void d2_begin_track_identity(int deck, int track_id)
+{
+    struct d2_screen_state *state;
+    struct d2_track_assets *old_assets;
+
+    if (deck < 1 || deck > 2)
+        return;
+    state = &d2_screen_state[deck];
+    if (++d2_track_generation[deck] == 0)
+        d2_track_generation[deck] = 1;
+    pthread_mutex_lock(&d2_track_load_mutex);
+    d2_track_load_job[deck].pending = 0;
+    pthread_mutex_unlock(&d2_track_load_mutex);
+
+    old_assets = d2_track_assets[deck];
+    d2_track_assets[deck] = NULL;
+    d2_bind_asset_slot(deck, NULL);
+    state->track_id = track_id > 0 ? track_id : 0;
+    state->position = 0.0f;
+    state->remaining = 0.0f;
+    state->duration = 0.0f;
+    state->bpm = 0.0f;
+    state->rate = 1.0f;
+    state->playing = 0;
+    state->visual_key = 0;
+    state->beatgrid_ready = 0;
+    state->beatmap_ready = 0;
+    state->beatmap_count = 0;
+    state->phase_valid = 0;
+    state->beatgrid_edit = 0;
+    state->position_updated_at = (struct timespec){0, 0};
+    state->location[0] = '\0';
+    for (int cue = 0; cue < 8; ++cue) {
+        state->hotcue_position[cue] = -1.0f;
+        state->hotcue_color[cue] = 0;
+    }
+
+    snprintf(state->title, sizeof(state->title), "DECK %d", deck);
+    snprintf(state->artist, sizeof(state->artist), "MIXXX");
+    snprintf(state->musical_key, sizeof(state->musical_key), "--");
+    free(old_assets);
+}
+
+static void d2_prepare_track_scratch(int slot,
+                                     struct d2_track_assets *assets)
+{
+    struct d2_screen_state *state = &d2_screen_state[slot];
+    memset(state, 0, sizeof(*state));
+    state->rate = 1.0f;
+    state->zoom_level = 2;
+    state->loop_size = 4.0f;
+    for (int cue = 0; cue < 8; ++cue)
+        state->hotcue_position[cue] = -1.0f;
+    d2_bind_asset_slot(slot, assets);
+}
+
+static int d2_build_track_assets(const struct d2_track_load_job *job,
+                                 struct d2_track_assets *assets,
+                                 int scratch_slot)
+{
+    struct d2_screen_state *scratch = &d2_screen_state[scratch_slot];
+    int track_id = job->track_id;
+    int loaded = 0;
+
+    d2_prepare_track_scratch(scratch_slot, assets);
+    scratch->duration = job->duration;
+    snprintf(scratch->location, sizeof(scratch->location), "%s",
+             job->location);
+
+    if (track_id <= 0 && job->location[0] != '\0')
+        track_id = d2_resolve_track_id_by_location(job->location);
+    scratch->track_id = track_id > 0 ? track_id : 0;
+
+    if (track_id > 0)
+        loaded = d2_load_track_metadata(
+                scratch_slot, track_id, job->duration);
+
+    if (!loaded && job->location[0] != '\0') {
+        const char *filename = strrchr(job->location, '/');
+        d2_load_real_waveform(
+                scratch_slot, job->location, job->duration);
+        if (d2_waveform_ready[scratch_slot])
+            d2_build_wave_strip(scratch_slot);
+        d2_load_cover_art(scratch_slot, job->location);
+        snprintf(scratch->location, sizeof(scratch->location), "%s",
+                 job->location);
+        d2_copy_text(scratch->title, sizeof(scratch->title),
+                     filename ? filename + 1 : job->location);
+        snprintf(scratch->artist, sizeof(scratch->artist), "FILE BROWSER");
+        snprintf(scratch->musical_key, sizeof(scratch->musical_key), "--");
+        loaded = d2_waveform_ready[scratch_slot] != 0;
+    }
+
+    assets->waveform_ready = d2_waveform_ready[scratch_slot];
+    assets->wave_strip_ready = d2_wave_strip_ready[scratch_slot];
+    assets->cover_art_ready = d2_cover_art_ready[scratch_slot];
+    return loaded;
+}
+
+static int d2_track_job_matches_locked(const struct d2_track_load_job *job)
+{
+    const struct d2_screen_state *state = &d2_screen_state[job->deck];
+    if (job->generation != d2_track_generation[job->deck])
+        return 0;
+    if (job->track_id > 0)
+        return state->track_id == job->track_id;
+    return state->track_id == 0 && job->location[0] != '\0' &&
+           strcmp(state->location, job->location) == 0;
+}
+
+static void d2_commit_track_assets(const struct d2_track_load_job *job,
+                                   struct d2_track_assets *assets,
+                                   int scratch_slot, int loaded)
+{
+    struct d2_track_assets *old_assets = NULL;
+    struct d2_screen_state *scratch = &d2_screen_state[scratch_slot];
+
+    pthread_mutex_lock(&d2_state_mutex);
+    if (d2_track_job_matches_locked(job)) {
+        struct d2_screen_state *state = &d2_screen_state[job->deck];
+        state->track_id = scratch->track_id;
+        d2_copy_text(state->title, sizeof(state->title),
+                     loaded ? scratch->title : "TRACK NOT INDEXED");
+        d2_copy_text(state->artist, sizeof(state->artist),
+                     loaded ? scratch->artist : "NO VALID MIXXX TRACK ID");
+        d2_copy_text(state->musical_key, sizeof(state->musical_key),
+                     loaded ? scratch->musical_key : "--");
+        if (scratch->location[0] != '\0')
+            d2_copy_text(state->location, sizeof(state->location),
+                         scratch->location);
+
+        state->beatgrid_first_position = scratch->beatgrid_first_position;
+        state->beatgrid_interval = scratch->beatgrid_interval;
+        state->beatgrid_ready = scratch->beatgrid_ready;
+        state->beatmap_count = scratch->beatmap_count;
+        state->beatmap_ready = scratch->beatmap_ready;
+        if (scratch->beatmap_count > 0) {
+            size_t count = (size_t)scratch->beatmap_count;
+            memcpy(state->beatmap_position, scratch->beatmap_position,
+                   count * sizeof(state->beatmap_position[0]));
+            memcpy(state->beatmap_source_index,
+                   scratch->beatmap_source_index,
+                   count * sizeof(state->beatmap_source_index[0]));
+        }
+
+        old_assets = d2_track_assets[job->deck];
+        d2_track_assets[job->deck] = assets;
+        d2_bind_asset_slot(job->deck, assets);
+        assets = NULL;
+    }
+    pthread_mutex_unlock(&d2_state_mutex);
+
+    d2_bind_asset_slot(scratch_slot, NULL);
+    memset(scratch, 0, sizeof(*scratch));
+    free(old_assets);
+    free(assets);
+}
+
+static void *d2_track_load_thread_main(void *userdata)
+{
+    int deck = *(const int *)userdata;
+    int scratch_slot = D2_LOAD_SCRATCH(deck);
+
+    for (;;) {
+        struct d2_track_load_job job;
+        pthread_mutex_lock(&d2_track_load_mutex);
+        while (!d2_track_load_stop && !d2_track_load_job[deck].pending)
+            pthread_cond_wait(&d2_track_load_cond, &d2_track_load_mutex);
+        if (d2_track_load_stop) {
+            pthread_mutex_unlock(&d2_track_load_mutex);
+            break;
+        }
+        job = d2_track_load_job[deck];
+        d2_track_load_job[deck].pending = 0;
+        pthread_mutex_unlock(&d2_track_load_mutex);
+
+        struct d2_track_assets *assets = calloc(1, sizeof(*assets));
+        if (!assets)
+            continue;
+        int loaded = d2_build_track_assets(&job, assets, scratch_slot);
+        d2_commit_track_assets(&job, assets, scratch_slot, loaded);
+    }
+    d2_bind_asset_slot(scratch_slot, NULL);
+    return NULL;
+}
+
+static void d2_queue_track_load(int deck, float duration)
+{
+    if (deck < 1 || deck > D2_PHYSICAL_DECKS || duration <= 1.0f)
+        return;
+    pthread_mutex_lock(&d2_track_load_mutex);
+    d2_track_load_job[deck].deck = deck;
+    d2_track_load_job[deck].track_id = d2_screen_state[deck].track_id;
+    d2_track_load_job[deck].duration = duration;
+    d2_track_load_job[deck].generation = d2_track_generation[deck];
+    snprintf(d2_track_load_job[deck].location,
+             sizeof(d2_track_load_job[deck].location), "%s",
+             d2_screen_state[deck].location);
+    d2_track_load_job[deck].pending = 1;
+    pthread_cond_broadcast(&d2_track_load_cond);
+    pthread_mutex_unlock(&d2_track_load_mutex);
+}
+
+static int d2_track_loaders_start(void)
+{
+    static int deck_arg[3] = {0, 1, 2};
+    pthread_mutex_lock(&d2_track_load_mutex);
+    d2_track_load_stop = 0;
+    pthread_mutex_unlock(&d2_track_load_mutex);
+    for (int deck = 1; deck <= D2_PHYSICAL_DECKS; ++deck) {
+        if (pthread_create(&d2_track_load_thread[deck], NULL,
+                           d2_track_load_thread_main,
+                           &deck_arg[deck]) != 0) {
+            pthread_mutex_lock(&d2_track_load_mutex);
+            d2_track_load_stop = 1;
+            pthread_cond_broadcast(&d2_track_load_cond);
+            pthread_mutex_unlock(&d2_track_load_mutex);
+            for (int started = 1; started < deck; ++started) {
+                pthread_join(d2_track_load_thread[started], NULL);
+                d2_track_load_thread_started[started] = 0;
+            }
+            return -1;
+        }
+        d2_track_load_thread_started[deck] = 1;
+    }
+    return 0;
+}
+
+static void d2_track_loaders_shutdown(void)
+{
+    pthread_mutex_lock(&d2_track_load_mutex);
+    d2_track_load_stop = 1;
+    for (int deck = 1; deck <= D2_PHYSICAL_DECKS; ++deck)
+        d2_track_load_job[deck].pending = 0;
+    pthread_cond_broadcast(&d2_track_load_cond);
+    pthread_mutex_unlock(&d2_track_load_mutex);
+
+    for (int deck = 1; deck <= D2_PHYSICAL_DECKS; ++deck) {
+        if (d2_track_load_thread_started[deck]) {
+            pthread_join(d2_track_load_thread[deck], NULL);
+            d2_track_load_thread_started[deck] = 0;
+        }
+    }
+
+    pthread_mutex_lock(&d2_state_mutex);
+    for (int deck = 1; deck <= D2_PHYSICAL_DECKS; ++deck) {
+        struct d2_track_assets *assets = d2_track_assets[deck];
+        d2_track_assets[deck] = NULL;
+        d2_bind_asset_slot(deck, NULL);
+        free(assets);
+    }
+    pthread_mutex_unlock(&d2_state_mutex);
 }
 
 static void d2_format_camelot_key(const char *input, char *output,
@@ -729,11 +1441,6 @@ static void d2_load_browse_metadata(int row, int track_id)
         }
         return;
     }
-    if (d2_browse_entries[row].track_id == track_id &&
-        d2_browse_entries[row].title[0] != '\0' &&
-        strcmp(d2_browse_entries[row].title, "LOADING...") != 0)
-        return;
-
     cached = d2_browse_cache_find(track_id);
     if (cached) {
         entry = cached->entry;
@@ -813,24 +1520,52 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
 
     if (strcmp(key, "BPM") == 0) {
         d2_screen_state[deck].bpm = strtof(value, NULL);
+    } else if (strcmp(key, "LOCBEGIN") == 0) {
+        unsigned long expected = strtoul(value, NULL, 10);
+        d2_begin_track_identity(deck, 0);
+        d2_encoded_location_length[deck] = 0;
+        d2_encoded_location[deck][0] = '\0';
+        d2_encoded_location_valid[deck] =
+            expected > 0 && expected < D2_ENCODED_LOCATION_MAX;
+    } else if (strcmp(key, "LOCCHUNK") == 0) {
+        size_t chunk_length = strlen(value);
+        size_t assembled = d2_encoded_location_length[deck];
+        if (d2_encoded_location_valid[deck] &&
+            assembled + chunk_length < D2_ENCODED_LOCATION_MAX) {
+            memcpy(d2_encoded_location[deck] + assembled,
+                   value, chunk_length + 1);
+            d2_encoded_location_length[deck] += chunk_length;
+        } else {
+            d2_encoded_location_valid[deck] = 0;
+        }
+    } else if (strcmp(key, "LOCEND") == 0) {
+        char exact_location[sizeof(d2_screen_state[deck].location)];
+        if (d2_encoded_location_valid[deck] &&
+            d2_percent_decode(d2_encoded_location[deck], exact_location,
+                              sizeof(exact_location))) {
+            /* Resolving an external/file-browser location touches SQLite and
+             * must never run in the ctlra/MIDI polling owner. The loader
+             * worker resolves it together with the remaining immutable
+             * track assets after LOAD arrives. */
+            d2_begin_track_identity(deck, 0);
+            snprintf(d2_screen_state[deck].location,
+                     sizeof(d2_screen_state[deck].location), "%s",
+                     exact_location);
+        }
+        d2_encoded_location_length[deck] = 0;
+        d2_encoded_location[deck][0] = '\0';
+        d2_encoded_location_valid[deck] = 0;
+    } else if (strcmp(key, "TRACKID") == 0) {
+        int track_id = atoi(value);
+        d2_begin_track_identity(deck, track_id);
     } else if (strcmp(key, "LOAD") == 0) {
-        /* A track-load event is the only normal path that may replace deck
-         * metadata and waveform. Do not infer identity repeatedly from the
-         * moving play position while a track is running. */
+        /* TRACKID is sent first for every successful Mixxx load.  LOAD only
+         * supplies the exact engine duration used for normalized rendering;
+         * it never selects a database row. */
         float duration = strtof(value, NULL);
         if (duration > 1.0f) {
             d2_screen_state[deck].duration = duration;
-            for (int cue = 0; cue < 8; ++cue)
-                d2_screen_state[deck].hotcue_position[cue] = -1.0f;
-            d2_screen_state[deck].beatgrid_ready = 0;
-            d2_screen_state[deck].beatmap_ready = 0;
-            d2_screen_state[deck].beatmap_count = 0;
-            d2_metadata_duration[deck] = 0.0f;
-            snprintf(d2_screen_state[deck].title,
-                     sizeof(d2_screen_state[deck].title), "DECK %d", deck);
-            snprintf(d2_screen_state[deck].artist,
-                     sizeof(d2_screen_state[deck].artist), "MIXXX");
-            d2_load_duration_metadata(deck, duration);
+            d2_queue_track_load(deck, duration);
         }
     } else if (strcmp(key, "POS") == 0) {
         float position = strtof(value, NULL);
@@ -855,8 +1590,6 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
                       &state->position_updated_at);
     } else if (strcmp(key, "PLAY") == 0) {
         int playing = atoi(value) != 0;
-        if (playing && !d2_screen_state[deck].playing)
-            d2_screen_state[deck].metadata_pending = 2;
         d2_screen_state[deck].playing = playing;
     } else if (strcmp(key, "DURATION") == 0) {
         d2_screen_state[deck].duration = strtof(value, NULL);
@@ -899,8 +1632,12 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         float active_phase = 0.0f;
         int master_step = 0;
         int active_step = 0;
-        int parsed = sscanf(value, "%f,%f,%d,%d", &master_phase,
-                            &active_phase, &master_step, &active_step);
+        int phase_valid = 1;
+        int master_deck = deck;
+        int follower_deck = deck == 1 ? 2 : 1;
+        int parsed = sscanf(value, "%f,%f,%d,%d,%d,%d,%d", &master_phase,
+                            &active_phase, &master_step, &active_step,
+                            &phase_valid, &master_deck, &follower_deck);
         if (parsed >= 2 &&
             isfinite(master_phase) && isfinite(active_phase)) {
             master_phase -= floorf(master_phase);
@@ -909,15 +1646,26 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
             if (active_phase < 0.0f) active_phase += 1.0f;
             d2_screen_state[deck].phase_master = master_phase;
             d2_screen_state[deck].phase_active = active_phase;
-            if (parsed == 4) {
+            if (parsed >= 4) {
                 d2_screen_state[deck].phase_master_step =
                     ((master_step % 4) + 4) % 4;
                 d2_screen_state[deck].phase_active_step =
                     ((active_step % 4) + 4) % 4;
             }
-            d2_screen_state[deck].phase_valid = 1;
+            d2_screen_state[deck].phase_valid =
+                parsed >= 5 ? phase_valid != 0 : 1;
+            if (parsed >= 7 && master_deck >= 1 && master_deck <= 2 &&
+                follower_deck >= 1 && follower_deck <= 2 &&
+                master_deck != follower_deck) {
+                d2_screen_state[deck].phase_master_deck = master_deck;
+                d2_screen_state[deck].phase_follower_deck = follower_deck;
+            } else {
+                d2_screen_state[deck].phase_master_deck = deck;
+                d2_screen_state[deck].phase_follower_deck = deck == 1 ? 2 : 1;
+            }
         }
     } else if (strcmp(key, "LEDPACK") == 0) {
+        d2_led_state[deck].outputs_enabled = 1;
         char packed[192];
         snprintf(packed, sizeof(packed), "%s", value);
         char *save = NULL;
@@ -941,8 +1689,7 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
                     d2_led_state[deck].mode = parsed;
                 break;
             case 8:
-                if (parsed >= 1 && parsed <= 4)
-                    d2_led_state[deck].fx_unit = parsed;
+                d2_led_state[deck].fx_unit = deck == 2 ? 2 : 1;
                 break;
             case 9:
                 for (int fx = 0; fx < 4; ++fx)
@@ -975,6 +1722,8 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         d2_led_state[deck].shift = atoi(value) != 0;
     } else if (strcmp(key, "LEDLOOP") == 0) {
         d2_led_state[deck].loop = atoi(value) != 0;
+    } else if (strcmp(key, "LEDOFF") == 0) {
+        d2_led_state[deck].outputs_enabled = 0;
     } else if (strcmp(key, "LEDDECK") == 0) {
         int channel = atoi(value);
         if (channel >= 1 && channel <= 4)
@@ -984,9 +1733,7 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         if (mode >= 1 && mode <= 5)
             d2_led_state[deck].mode = mode;
     } else if (strcmp(key, "LEDFXSEL") == 0) {
-        int unit = atoi(value);
-        if (unit >= 1 && unit <= 4)
-            d2_led_state[deck].fx_unit = unit;
+        d2_led_state[deck].fx_unit = deck == 2 ? 2 : 1;
     } else if (strncmp(key, "LEDFX", 5) == 0 && key[5] >= '1' && key[5] <= '4') {
         d2_led_state[deck].fx_enabled[key[5] - '1'] = atoi(value) != 0;
     } else if (strncmp(key, "LEDON", 5) == 0 && key[5] >= '1' && key[5] <= '4') {
@@ -1007,6 +1754,35 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         int slot = atoi(key + 4) - 1;
         if (slot >= 0 && slot < 4)
             d2_screen_state[deck].fx_enabled[slot] = atoi(value) != 0;
+    } else if (strncmp(key, "FXSEL", 5) == 0) {
+        int slot = atoi(key + 5) - 1;
+        int selection = atoi(value);
+        if (slot >= 0 && slot < 3 && selection >= 0) {
+            int changed = d2_screen_state[deck].fx_selection[slot] != selection;
+            d2_screen_state[deck].fx_selection[slot] = selection;
+            /* A selection confirmation always precedes its name snapshot.
+             * Do not leave the previous effect's name visible in between. */
+            if (changed)
+                d2_screen_state[deck].fx_name[slot][0] = '\0';
+        }
+    } else if (strncmp(key, "FXNAME", 6) == 0 &&
+               key[6] >= '1' && key[6] <= '3' && key[7] == '\0') {
+        int slot = key[6] - '1';
+        char decoded[sizeof(d2_screen_state[deck].fx_name[slot])];
+        /* U: versions the wire encoding and, unlike an empty SysEx field,
+         * can represent an intentionally empty slot. Malformed input is
+         * rejected transactionally so it cannot corrupt a good label. */
+        if (strncmp(value, "U:", 2) == 0) {
+            if (value[2] == '\0') {
+                d2_screen_state[deck].fx_name[slot][0] = '\0';
+            } else if (d2_percent_decode(value + 2, decoded,
+                                         sizeof(decoded)) &&
+                       d2_valid_utf8(decoded)) {
+                snprintf(d2_screen_state[deck].fx_name[slot],
+                         sizeof(d2_screen_state[deck].fx_name[slot]), "%s",
+                         decoded);
+            }
+        }
     } else if (strncmp(key, "FX", 2) == 0 && key[2] >= '1' && key[2] <= '4') {
         int slot = key[2] - '1';
         float parameter = strtof(value, NULL);
@@ -1025,6 +1801,13 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         int stem = atoi(key + 8) - 1;
         if (stem >= 0 && stem < 4)
             d2_screen_state[deck].stem_muted[stem] = atoi(value) != 0;
+    } else if (strcmp(key, "GRIDEDIT") == 0) {
+        d2_screen_state[deck].beatgrid_edit = atoi(value) != 0;
+    } else if (strncmp(key, "CUECOLOR", 8) == 0) {
+        int cue = atoi(key + 8) - 1;
+        unsigned long color = strtoul(value, NULL, 10);
+        if (cue >= 0 && cue < 8 && color <= 0x00ffffffUL)
+            d2_screen_state[deck].hotcue_color[cue] = (uint32_t)color;
     } else if (strncmp(key, "CUE", 3) == 0) {
         int cue = atoi(key + 3) - 1;
         float cue_position = strtof(value, NULL);
@@ -1034,37 +1817,21 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
         d2_screen_state[deck].remaining = strtof(value, NULL);
         if (d2_screen_state[deck].remaining < 0.0f)
             d2_screen_state[deck].remaining = 0.0f;
-        /* Mixxx now provides the exact track duration. Keep the old formula
-         * only as a compatibility fallback; rounded POS/REMAIN packets made
-         * it drift enough to repeatedly discard valid metadata. */
-        float duration = d2_screen_state[deck].duration;
-        if (duration <= 0.0f && d2_screen_state[deck].remaining > 0.0f &&
-            d2_screen_state[deck].position < 0.999f)
-            duration = d2_screen_state[deck].remaining /
-                       (1.0f - d2_screen_state[deck].position);
-        /* Compatibility fallback for old controller scripts that don't emit
-         * LOAD. With the current script this executes only before init. */
-        if (duration > 0.0f &&
-            d2_screen_state[deck].metadata_pending == 0 &&
-            strncmp(d2_screen_state[deck].title, "DECK", 4) == 0)
-            d2_screen_state[deck].metadata_pending = 2;
-        if (d2_screen_state[deck].metadata_pending > 0 &&
-            --d2_screen_state[deck].metadata_pending == 0)
-            d2_load_duration_metadata(deck, duration);
     } else if (strcmp(key, "TITLE") == 0) {
-        snprintf(d2_screen_state[deck].title,
-                sizeof(d2_screen_state[deck].title), "%s", value);
+        d2_copy_text(d2_screen_state[deck].title,
+                     sizeof(d2_screen_state[deck].title), value);
     } else if (strcmp(key, "ARTIST") == 0) {
-        snprintf(d2_screen_state[deck].artist,
-                sizeof(d2_screen_state[deck].artist), "%s", value);
+        d2_copy_text(d2_screen_state[deck].artist,
+                     sizeof(d2_screen_state[deck].artist), value);
     } else if (strncmp(key, "BROWSE", 6) == 0 &&
                key[6] >= '0' && key[6] <= '8' && key[7] == '\0') {
         d2_load_browse_metadata(key[6] - '0', atoi(value));
     } else if (strcmp(key, "VIEW") == 0) {
         d2_browse_mark_dirty();
-        if (strcmp(value, "DECK") == 0)
+        if (strcmp(value, "DECK") == 0) {
             d2_screen_view[deck] = D2_VIEW_DECK;
-        else if (strcmp(value, "BROWSE") == 0)
+            d2_clear_browse_notice(deck);
+        } else if (strcmp(value, "BROWSE") == 0)
             d2_screen_view[deck] = D2_VIEW_BROWSE;
         else if (strcmp(value, "HOTCUE") == 0)
             d2_screen_view[deck] = D2_VIEW_HOTCUE;
@@ -1076,6 +1843,21 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
             d2_screen_view[deck] = D2_VIEW_FREEZE;
         else if (strcmp(value, "BEATJUMP") == 0)
             d2_screen_view[deck] = D2_VIEW_BEATJUMP;
+    } else if (strcmp(key, "LOADREJECT") == 0) {
+        if (strcmp(value, "PLAYING") == 0)
+            d2_set_browse_notice(deck, D2_BROWSE_NOTICE_DECK_PLAYING,
+                                 d2_monotonic_us());
+    } else if (strcmp(key, "LOADFAIL") == 0) {
+        enum d2_browse_notice_kind kind = D2_BROWSE_NOTICE_LOAD_FAILED;
+        if (strcmp(value, "MISSING") == 0)
+            kind = D2_BROWSE_NOTICE_TRACK_MISSING;
+        else if (strcmp(value, "NOSELECTION") == 0)
+            kind = D2_BROWSE_NOTICE_NO_SELECTION;
+        /* A failure is useful only while the corresponding D2 is still in
+         * Browse. Never retain an asynchronous old-deck failure and reveal it
+         * when Browse is opened later. */
+        if (d2_screen_view[deck] == D2_VIEW_BROWSE)
+            d2_set_browse_notice(deck, kind, d2_monotonic_us());
     } else {
         return;
     }
@@ -1247,6 +2029,8 @@ static inline void rgb565(uint8_t *p, int r, int g, int b)
  * the deck view is no longer limited by the old 5x7 controller font. */
 static void d2_font_init(void)
 {
+    if (d2_ft_ready)
+        return;
     if (FT_Init_FreeType(&d2_ft_library) != 0)
         return;
     if (FT_New_Face(d2_ft_library,
@@ -1281,7 +2065,10 @@ static int d2_font_pixel_size(int scale)
  * the proven wire order of the current D2 bulk screen driver. */
 static void d2_build_wave_strip(int deck)
 {
-    if (deck < 1 || deck > 2 || !d2_waveform_ready[deck])
+    if (deck < 0 || deck >= D2_ASSET_SLOTS || !d2_wave_strip[deck] ||
+        !d2_waveform[deck] || !d2_waveform_low[deck] ||
+        !d2_waveform_mid[deck] || !d2_waveform_high[deck] ||
+        !d2_waveform_ready[deck])
         return;
     for (int y = 0; y < D2_WAVEFORM_HEIGHT; ++y)
         for (int x = 0; x < D2_WAVEFORM_POINTS; ++x)
@@ -1383,28 +2170,6 @@ static const uint8_t d2_font[128][5] = {
     ['Z'] = {0x61, 0x51, 0x49, 0x45, 0x43},
 };
 
-static int d2_text_pixel(const char *text, int x, int y,
-        int origin_x, int origin_y, int scale)
-{
-    int local_x = x - origin_x;
-    int local_y = y - origin_y;
-    if (local_x < 0 || local_y < 0)
-        return 0;
-
-    int character = local_x / (6 * scale);
-    int column = (local_x / scale) % 6;
-    int row = local_y / scale;
-    if (row >= 7 || column >= 5 ||
-            character >= (int)strlen(text) || text[character] == '\0')
-        return 0;
-
-    unsigned char glyph = (unsigned char)text[character];
-    if (glyph >= 'a' && glyph <= 'z')
-        glyph = (unsigned char)(glyph - 'a' + 'A');
-
-    return (d2_font[glyph][column] & (1u << row)) != 0;
-}
-
 /* Fast raster primitives.  The original prototype evaluated every label at
  * every pixel (several million glyph tests per second).  At 60 FPS that was
  * the actual CPU bottleneck, not waveform analysis or USB bulk bandwidth. */
@@ -1471,11 +2236,20 @@ static void d2_draw_phase_meter(uint8_t *pixels,
                                 const struct d2_screen_state *state,
                                 int player)
 {
+    (void)player;
     if (!state || !state->phase_valid)
         return;
+    const char *master_label = state->phase_master_deck == 2 ? "B" : "A";
+    const char *follower_label = state->phase_follower_deck == 1 ? "A" : "B";
     d2_fill_rect(pixels, 156, 22, 168, 25, 0, 0, 0);
-    d2_draw_text(pixels, player == 1 ? "A" : "B", 145, 22, 1,
+    /* Both physical displays use the same row order. Amber is always the
+     * Sync Leader/reference deck; white is always the follower. Explicit
+     * A/B labels make a leader change understandable instead of making one
+     * screen's meter disappear or silently reverse its meaning. */
+    d2_draw_text(pixels, master_label, 145, 18, 1,
                  244, 150, 18);
+    d2_draw_text(pixels, follower_label, 145, 31, 1,
+                 225, 229, 234);
     d2_draw_phase_row(pixels, state->phase_master_step,
                       24, 244, 150, 18, 0);
     d2_draw_phase_row(pixels, state->phase_active_step,
@@ -1519,6 +2293,14 @@ static uint32_t d2_utf8_next(const char **cursor)
         codepoint = ((uint32_t)(s[0] & 0x0f) << 12) |
                     ((uint32_t)(s[1] & 0x3f) << 6) | (s[2] & 0x3f);
         *cursor = (const char *)(s + 3);
+        return codepoint;
+    }
+    if ((s[0] & 0xf8) == 0xf0 && (s[1] & 0xc0) == 0x80 &&
+        (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+        codepoint = ((uint32_t)(s[0] & 0x07) << 18) |
+                    ((uint32_t)(s[1] & 0x3f) << 12) |
+                    ((uint32_t)(s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+        *cursor = (const char *)(s + 4);
         return codepoint;
     }
     *cursor = (const char *)(s + 1);
@@ -1607,32 +2389,215 @@ static void d2_draw_text(uint8_t *pixels, const char *text, int x, int y,
     }
 }
 
-static unsigned d2_browse_hash(const char *text)
+static int d2_measure_text_width(const char *text, int scale)
 {
-    unsigned hash = 2166136261u;
-    if (!text)
-        return hash;
-    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
-        hash = (hash ^ *p) * 16777619u;
-    return hash;
+    if (!text || !*text || scale < 1)
+        return 0;
+    if (!d2_ft_ready)
+        return (int)strlen(text) * 6 * scale;
+
+    const int pixel_size = d2_font_pixel_size(scale);
+    const char *cursor = text;
+    int width = 0;
+    FT_Set_Pixel_Sizes(d2_ft_face, 0, pixel_size);
+    while (*cursor) {
+        uint32_t codepoint = d2_utf8_next(&cursor);
+        if (FT_Load_Char(d2_ft_face, codepoint, FT_LOAD_DEFAULT) == 0)
+            width += d2_ft_face->glyph->advance.x >> 6;
+    }
+    return width;
+}
+
+static void d2_fit_text(char *destination, size_t destination_size,
+                        const char *source, int scale, int max_width)
+{
+    char candidate[96];
+    size_t length;
+
+    if (!destination || destination_size == 0)
+        return;
+    snprintf(destination, destination_size, "%s", source ? source : "");
+    if (d2_measure_text_width(destination, scale) <= max_width)
+        return;
+
+    snprintf(candidate, sizeof(candidate), "%s", destination);
+    length = strlen(candidate);
+    while (length > 0) {
+        do {
+            --length;
+        } while (length > 0 &&
+                 (((unsigned char)candidate[length] & 0xc0) == 0x80));
+        candidate[length] = '\0';
+        snprintf(destination, destination_size, "%s...", candidate);
+        if (d2_measure_text_width(destination, scale) <= max_width)
+            return;
+    }
+    destination[0] = '\0';
+}
+
+static void d2_fx_slot_label(char *destination, size_t destination_size,
+                             const struct d2_screen_state *state, int effect,
+                             int max_width)
+{
+    char full_label[96];
+    int selected = state->fx_selection[effect];
+
+    if (selected <= 0) {
+        snprintf(full_label, sizeof(full_label), "FX%d EMPTY", effect + 1);
+    } else if (state->fx_name[effect][0]) {
+        snprintf(full_label, sizeof(full_label), "FX%d %s", effect + 1,
+                 state->fx_name[effect]);
+    } else {
+        snprintf(full_label, sizeof(full_label), "FX%d LOADING", effect + 1);
+    }
+    d2_fit_text(destination, destination_size, full_label, 1, max_width);
+}
+
+static void d2_draw_text_centered(uint8_t *pixels, const char *text,
+                                  int center_x, int y, int scale,
+                                  int r, int g, int b)
+{
+    int width = d2_measure_text_width(text, scale);
+    d2_draw_text(pixels, text, center_x - width / 2, y, scale, r, g, b);
+}
+
+static void d2_render_dynamic_performance_view(
+        uint8_t *pixels, enum d2_screen_view view, const char *deck_title,
+        const uint32_t pad_rgb[8],
+        int accent_r, int accent_g, int accent_b)
+{
+    const char *heading = d2_performance_heading(view);
+    const char *instruction = d2_performance_instruction(view);
+
+    d2_fill_rect(pixels, 0, 0, WIDTH, HEIGHT, 12, 14, 18);
+    d2_fill_rect(pixels, 0, 0, WIDTH, 62, 21, 23, 29);
+    d2_fill_rect(pixels, 0, 59, WIDTH, 3,
+                 accent_r, accent_g, accent_b);
+    d2_draw_text(pixels, heading, 18, 10, 3, 240, 240, 245);
+    if (deck_title && deck_title[0])
+        d2_draw_text(pixels, deck_title, 18, 42, 1, 180, 190, 205);
+
+    /* Keep the already-approved 440x128 performance area, but make every
+     * physical pad a live cell. LEDPACK is the one authoritative color state
+     * shared by the hardware LEDs and this screen. */
+    for (int pad = 0; pad < 8; ++pad) {
+        int column = pad % 4;
+        int row = pad / 4;
+        int x = 24 + column * 110;
+        int y = 80 + row * 64;
+        uint32_t rgb = pad_rgb ? pad_rgb[pad] & 0x00ffffffU : 0;
+        int r = (int)((rgb >> 16) & 0xff);
+        int g = (int)((rgb >> 8) & 0xff);
+        int b = (int)(rgb & 0xff);
+        if (r + g + b < 18)
+            r = g = b = 10;
+        d2_fill_rect(pixels, x, y, 98, 52,
+                     accent_r / 2, accent_g / 2, accent_b / 2);
+        d2_fill_rect(pixels, x + 2, y + 2, 94, 48, r, g, b);
+        /* The pad value is the primary information in these views.  Use the
+         * 21 px font and retain the y offset so the larger glyph's visible
+         * ink is optically centred in the 52 px cell.  The previous 14 px
+         * label sat visibly high and looked undersized on the physical D2. */
+        d2_draw_text_centered(pixels,
+                              d2_performance_pad_label(view, pad),
+                              x + 49, y + 13, 3, 250, 250, 255);
+    }
+
+    d2_draw_text_centered(pixels, instruction, WIDTH / 2, 214, 1,
+                          180, 186, 196);
+    d2_draw_text(pixels, "DECK TO EXIT", 20, 240, 1, 150, 155, 165);
+    d2_fill_rect(pixels, 0, 0, WIDTH, 1, accent_r, accent_g, accent_b);
+    d2_fill_rect(pixels, 0, HEIGHT - 1, WIDTH, 1,
+                 accent_r, accent_g, accent_b);
+    d2_fill_rect(pixels, 0, 0, 1, HEIGHT, accent_r, accent_g, accent_b);
+    d2_fill_rect(pixels, WIDTH - 1, 0, 1, HEIGHT,
+                 accent_r, accent_g, accent_b);
 }
 
 static void d2_draw_browse_art(uint8_t *pixels, int x, int y,
                                const struct d2_browse_entry *entry,
                                int selected)
 {
-    unsigned hash = d2_browse_hash(entry ? entry->title : "");
-    int r = 48 + (int)(hash & 0x3f);
-    int g = 38 + (int)((hash >> 7) & 0x4f);
-    int b = 52 + (int)((hash >> 15) & 0x5f);
+    int has_track = entry && entry->track_id > 0;
+    int available = has_track && entry->available;
     d2_fill_rect(pixels, x, y, 23, 23, selected ? 255 : 32,
                  selected ? 170 : 38, selected ? 45 : 48);
-    d2_fill_rect(pixels, x + 2, y + 2, 19, 19, r, g, b);
-    d2_fill_rect(pixels, x + 3, y + 3, 17, 5, r / 2, g / 2, b / 2);
-    d2_fill_rect(pixels, x + 3, y + 16, 17, 4, 8, 10, 14);
-    char number[3] = {entry && entry->track_id ?
-                      (char)('1' + (entry->track_id % 8)) : '-', '\0', '\0'};
-    d2_draw_text(pixels, number, x + 8, y + 6, 1, 246, 248, 250);
+    d2_fill_rect(pixels, x + 2, y + 2, 19, 19,
+                 available ? 18 : 52, available ? 34 : 12,
+                 available ? 42 : 12);
+    if (available) {
+        /* Honest track glyph: the old track_id modulo digit looked like a
+         * cue/index value even though it represented no Mixxx state. */
+        d2_fill_rect(pixels, x + 12, y + 5, 2, 11, 76, 218, 235);
+        d2_fill_rect(pixels, x + 13, y + 5, 5, 2, 76, 218, 235);
+        d2_fill_rect(pixels, x + 8, y + 14, 6, 5, 76, 218, 235);
+    } else if (has_track) {
+        d2_fill_rect(pixels, x + 6, y + 6, 11, 2, 235, 70, 55);
+        d2_fill_rect(pixels, x + 6, y + 15, 11, 2, 235, 70, 55);
+        for (int offset = 0; offset < 8; ++offset) {
+            d2_fill_rect(pixels, x + 7 + offset, y + 7 + offset,
+                         2, 2, 235, 70, 55);
+            d2_fill_rect(pixels, x + 14 - offset, y + 7 + offset,
+                         2, 2, 235, 70, 55);
+        }
+    } else {
+        d2_fill_rect(pixels, x + 7, y + 11, 9, 2, 82, 90, 98);
+    }
+}
+
+static void d2_draw_browse_notice(uint8_t *pixels,
+                                  enum d2_browse_notice_kind kind)
+{
+    const int x = 67;
+    const int y = 102;
+    const int width = 346;
+    const int height = 68;
+    const char *heading = "LOAD FAILED";
+    const char *detail = "CHECK FILE";
+    int border_r = 232;
+    int border_g = 58;
+    int border_b = 42;
+    int detail_r = 244;
+    int detail_g = 92;
+    int detail_b = 64;
+
+    if (kind == D2_BROWSE_NOTICE_DECK_PLAYING) {
+        heading = "DECK PLAYING";
+        detail = "STOP TO LOAD";
+    } else if (kind == D2_BROWSE_NOTICE_TRACK_MISSING) {
+        heading = "TRACK OFFLINE";
+        detail = "FILE NOT FOUND";
+        border_r = 240;
+        border_g = 142;
+        border_b = 28;
+        detail_r = 255;
+        detail_g = 190;
+        detail_b = 70;
+    } else if (kind == D2_BROWSE_NOTICE_NO_SELECTION) {
+        heading = "NO TRACK SELECTED";
+        detail = "TURN BROWSE";
+        border_r = 0;
+        border_g = 170;
+        border_b = 205;
+        detail_r = 45;
+        detail_g = 210;
+        detail_b = 235;
+    }
+
+    /* Opaque compositing keeps the safety message readable over every album
+     * color and costs only one cached Browse redraw at show/hide time. */
+    d2_fill_rect(pixels, x, y, width, height, 7, 8, 10);
+    d2_fill_rect(pixels, x, y, width, 2, border_r, border_g, border_b);
+    d2_fill_rect(pixels, x, y + height - 2, width, 2,
+                 border_r, border_g, border_b);
+    d2_fill_rect(pixels, x, y, 2, height, border_r, border_g, border_b);
+    d2_fill_rect(pixels, x + width - 2, y, 2, height,
+                 border_r, border_g, border_b);
+    d2_draw_text_centered(
+        pixels, heading, x + width / 2, 111, 2, 255, 255, 255);
+    d2_draw_text_centered(
+        pixels, detail, x + width / 2, 140, 2,
+        detail_r, detail_g, detail_b);
 }
 
 static void d2_trim_line(char *text)
@@ -1715,7 +2680,7 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     d2_fill_rect(pixels, 0, 0, WIDTH, 26, 25, 29, 34);
     d2_fill_rect(pixels, 0, 25, WIDTH, 1, 0, 112, 138);
     d2_draw_text(pixels, "BROWSER >", 5, 5, 1, 188, 198, 208);
-    d2_draw_text(pixels, sidebar_open ? "LIBRARY >" : "PLAYLIST >",
+    d2_draw_text(pixels, sidebar_open ? "LIBRARY >" : "TRACKS >",
                  54, 5, 1, 205, 213, 220);
     d2_draw_text(pixels, context, 106, 5, 1, 76, 218, 235);
     d2_draw_text(pixels, player == 1 ? "A" : "B", 469, 5, 1,
@@ -1828,12 +2793,49 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     }
 }
 
-static void d2_render_deck_fast(uint8_t *pixels, int player,
+static int d2_beat_position_to_x(float beat_position, float play_position,
+                                 float source_step)
+{
+    if (!isfinite(beat_position) || !isfinite(play_position) ||
+        !isfinite(source_step) || source_step <= 0.0f)
+        return -1;
+    return 240 + (int)lroundf(((beat_position - play_position) *
+                               (D2_WAVEFORM_POINTS - 1)) / source_step);
+}
+
+static int d2_fx_overlay_active(int player,
                                 const struct d2_screen_state *state,
+                                int slot, int touch_mask)
+{
+    if (player < 1 || player > 2 || !state || slot < 0 || slot > 3)
+        return 0;
+    int active_channel = d2_led_state[player].active_channel;
+    int unit_assigned = active_channel >= 1 && active_channel <= 4 &&
+        (d2_led_state[player].fx_assign_mask &
+         (1 << (active_channel - 1))) != 0;
+    return (slot == 0 ? unit_assigned : state->fx_enabled[slot - 1]) ||
+           (touch_mask & (1 << slot));
+}
+
+static int d2_fx_unit_for_player(int player)
+{
+    if (player < 1 || player > 2)
+        return 1;
+    return player;
+}
+
+static const char *d2_fx_unit_label(int player)
+{
+    return d2_fx_unit_for_player(player) == 2 ? "FX UNIT 2" : "FX UNIT 1";
+}
+
+static void d2_render_deck_fast(uint8_t *pixels, int player,
+                                struct d2_screen_state *state,
                                 float position, const char *title,
                                 int accent_r, int accent_g, int accent_b)
 {
     char bpm[16], time_text[20], tempo[16], loop_text[8], header_title[44];
+    int track_loaded = state->duration > 1.0f;
     float elapsed_time = fmaxf(0.0f, position * state->duration);
     float remaining_time = state->duration > 0.0f ?
         fmaxf(0.0f, state->duration - elapsed_time) :
@@ -1848,7 +2850,10 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
                            state->zoom_level : 2;
     const float source_step = 2.0f / (float)zoom_level;
 
-    snprintf(bpm, sizeof(bpm), "%.2f", state->bpm);
+    if (track_loaded && state->bpm > 0.0f)
+        snprintf(bpm, sizeof(bpm), "%.2f", state->bpm);
+    else
+        snprintf(bpm, sizeof(bpm), "--");
     snprintf(time_text, sizeof(time_text), state->time_mode ? "%02d:%02d.%02d" :
              "-%02d:%02d.%02d", seconds / 60, seconds % 60, centiseconds);
     snprintf(tempo, sizeof(tempo), "%+.2f%%", tempo_value);
@@ -1899,14 +2904,14 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
                 }
             }
         }
-    } else {
+    } else if (d2_waveform_ready[player]) {
         for (int local_x = 0; local_x < wave_width; ++local_x) {
             float source = strip_center +
                            (local_x - wave_width / 2) * source_step;
             if (source < 0.0f) source = 0.0f;
             if (source > D2_WAVEFORM_POINTS - 1) source = D2_WAVEFORM_POINTS - 1;
             int index = (int)source;
-            int amplitude = d2_waveform_ready[player] ? d2_waveform[player][index] : 10;
+            int amplitude = d2_waveform[player][index];
             d2_fill_rect(pixels, wave_left + local_x, wave_center - amplitude,
                          1, amplitude * 2 + 1, 40, 170, 230);
         }
@@ -1933,11 +2938,16 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
             float beat_position = state->beatmap_position[beat];
             if (beat_position > maximum)
                 break;
-            int x = 240 + (int)(((beat_position - position) *
-                                (D2_WAVEFORM_POINTS - 1)) / source_step + 0.5f);
+            int x = d2_beat_position_to_x(
+                    beat_position, position, source_step);
             if (x < wave_left || x >= wave_left + wave_width)
                 continue;
-            int is_bar = (beat % 4) == 0;
+            /* Preserve the original protobuf index.  BeatMap itself carries
+             * no time-signature/downbeat field; index zero is therefore only
+             * the configured 4/4 visual anchor, never an inferred result of
+             * filtering or clipping the source list. */
+            int source_index = state->beatmap_source_index[beat];
+            int is_bar = ((source_index % 4) + 4) % 4 == 0;
             int tick_height = is_bar ? 13 : 7;
             int red = is_bar ? 210 : 205;
             int green = is_bar ? 34 : 210;
@@ -1955,8 +2965,8 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
         for (int beat = current_beat - 12; beat <= current_beat + 12; ++beat) {
             float beat_position = state->beatgrid_first_position +
                                   beat * state->beatgrid_interval;
-            int x = 240 + (int)(((beat_position - position) *
-                                (D2_WAVEFORM_POINTS - 1)) / source_step + 0.5f);
+            int x = d2_beat_position_to_x(
+                    beat_position, position, source_step);
             if (x < wave_left || x >= wave_left + wave_width)
                 continue;
             int is_bar = ((beat % 4) + 4) % 4 == 0;
@@ -2000,18 +3010,28 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
     /* Capacitive FX overlay. It is composited last over the waveform so touch
      * feedback is immediate and disappears without disturbing deck state. */
     int fx_touch_mask = state->fx_touch_mask;
-    if (fx_touch_mask && d2_fx_touch_updated_us[player] != 0 &&
+    if (fx_touch_mask && fx_touch_mask != 0x0f &&
+        d2_fx_touch_updated_us[player] != 0 &&
         d2_monotonic_us() - d2_fx_touch_updated_us[player] > 1500000ULL) {
         fx_touch_mask = 0;
+        state->fx_touch_mask = 0;
         d2_fx_touch_updated_us[player] = 0;
     }
     if (fx_touch_mask) {
-        static const char *fx_labels[4] = {"MIX", "FX 1", "FX 2", "FX 3"};
+        char fx_labels[4][96];
+        snprintf(fx_labels[0], sizeof(fx_labels[0]), "MIX");
+        for (int effect = 0; effect < 3; ++effect)
+            d2_fx_slot_label(fx_labels[effect + 1],
+                             sizeof(fx_labels[effect + 1]), state, effect, 102);
+        int fx_unit = d2_fx_unit_for_player(player);
+        int unit_r = fx_unit == 2 ? 255 : 20;
+        int unit_g = fx_unit == 2 ? 145 : 145;
+        int unit_b = fx_unit == 2 ? 24 : 255;
         d2_fill_rect(pixels, 7, 74, 466, 78, 8, 11, 15);
         for (int slot = 0; slot < 4; ++slot) {
             int x = 13 + slot * 115;
-            int active = state->fx_enabled[slot] ||
-                         (fx_touch_mask & (1 << slot));
+            int active = d2_fx_overlay_active(
+                player, state, slot, fx_touch_mask);
             int bar = (int)(104.0f * state->fx_parameter[slot]);
             d2_fill_rect(pixels, x, 99, 104, 9, 35, 39, 44);
             d2_fill_rect(pixels, x, 99, bar, 9,
@@ -2022,6 +3042,14 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
                          active ? 250 : 165, active ? 250 : 170,
                          active ? 250 : 178);
         }
+        /* The physical FX SELECT lamp is brightness-only in the D2 HID
+         * report, so RGB colors cannot distinguish the selected unit. Keep
+         * the approved player geometry unchanged and expose the selection
+         * only inside this transient capacitive-touch overlay. */
+        d2_fill_rect(pixels, 191, 116, 98, 23, 19, 23, 28);
+        d2_fill_rect(pixels, 191, 116, 98, 2, unit_r, unit_g, unit_b);
+        d2_draw_text_centered(pixels, d2_fx_unit_label(player), 240, 120, 1,
+                              unit_r, unit_g, unit_b);
     }
 
     d2_fill_rect(pixels, 0, 195, WIDTH, 43, 0, 0, 0);
@@ -2043,34 +3071,37 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
                       accent_r, accent_g, accent_b);
     }
     d2_fill_rect(pixels, 5, 243, 470, 25, 7, 14, 20);
-    for (int x = 0; x < 470; ++x) {
-        int index = x * D2_WAVEFORM_POINTS / 470;
-        int height = d2_waveform_ready[player] ? d2_waveform[player][index] / 4 : 4;
-        int r = 45, g = 175, b = 238;
-        if (d2_waveform_ready[player] == 2) {
-            r = 15 + d2_waveform_low[player][index] * 220 / 255;
-            g = 35 + d2_waveform_mid[player][index] * 180 / 255;
-            b = 70 + d2_waveform_high[player][index] * 185 / 255;
+    if (d2_waveform_ready[player]) {
+        for (int x = 0; x < 470; ++x) {
+            int index = x * D2_WAVEFORM_POINTS / 470;
+            int height = d2_waveform[player][index] / 4;
+            int r = 45, g = 175, b = 238;
+            if (d2_waveform_ready[player] == 2) {
+                r = 15 + d2_waveform_low[player][index] * 220 / 255;
+                g = 35 + d2_waveform_mid[player][index] * 180 / 255;
+                b = 70 + d2_waveform_high[player][index] * 185 / 255;
+            }
+            if (height > 10) height = 10;
+            d2_fill_rect(pixels, 5 + x, 255 - height, 1,
+                         height * 2 + 1, r, g, b);
         }
-        if (height > 10) height = 10;
-        d2_fill_rect(pixels, 5 + x, 255 - height, 1, height * 2 + 1, r, g, b);
-    }
-    int overview = 5 + (int)(470.0f * position);
-    d2_fill_rect(pixels, overview - 1, 240, 3, 31, 250, 250, 250);
+        int overview = 5 + (int)(470.0f * position);
+        d2_fill_rect(pixels, overview - 1, 240, 3, 31, 250, 250, 250);
 
-    static const int cue_colors[8][3] = {
-        {255, 238, 0}, {0, 144, 198}, {0, 244, 70}, {0, 144, 198},
-        {0, 144, 198}, {0, 244, 70}, {0, 244, 70}, {0, 244, 70},
-    };
-    for (int cue = 0; cue < 8; ++cue) {
-        float cue_position = state->hotcue_position[cue];
-        if (cue_position < 0.0f || cue_position > 1.0f)
-            continue;
-        int cue_x = 5 + (int)(cue_position * 470.0f);
-        d2_fill_rect(pixels, cue_x - 4, 236, 9, 8,
-                     cue_colors[cue][0], cue_colors[cue][1], cue_colors[cue][2]);
-        char cue_label[2] = {(char)('1' + cue), '\0'};
-        d2_draw_text(pixels, cue_label, cue_x - 2, 235, 1, 0, 0, 0);
+        for (int cue = 0; cue < 8; ++cue) {
+            float cue_position = state->hotcue_position[cue];
+            if (cue_position < 0.0f || cue_position > 1.0f)
+                continue;
+            uint32_t color = state->hotcue_color[cue];
+            int cue_r = color ? (int)((color >> 16) & 0xff) : 0;
+            int cue_g = color ? (int)((color >> 8) & 0xff) : 170;
+            int cue_b = color ? (int)(color & 0xff) : 235;
+            int cue_x = 5 + (int)(cue_position * 470.0f);
+            d2_fill_rect(pixels, cue_x - 4, 236, 9, 8,
+                         cue_r, cue_g, cue_b);
+            char cue_label[2] = {(char)('1' + cue), '\0'};
+            d2_draw_text(pixels, cue_label, cue_x - 2, 235, 1, 0, 0, 0);
+        }
     }
 
     d2_draw_text(pixels, header_title, 3, 0, 2, 242, 245, 247);
@@ -2122,6 +3153,9 @@ static void d2_render_deck_fast(uint8_t *pixels, int player,
     char zoom_text[8];
     snprintf(zoom_text, sizeof(zoom_text), "%dX", zoom_level);
     d2_draw_text(pixels, zoom_text, 3, 52, 1, 180, 188, 196);
+    if (state->beatgrid_edit)
+        d2_draw_text(pixels, "GRID  OFFSET  TEMPO  JUMP  LOOP",
+                     28, 52, 1, 245, 62, 48);
 }
 
 /* Render producer: always overwrite the non-published RGB565 buffer.  USB
@@ -2131,6 +3165,7 @@ static void *d2_render_thread_main(void *userdata)
 {
     (void)userdata;
     struct timespec deadline;
+    d2_font_init();
     clock_gettime(CLOCK_MONOTONIC, &deadline);
 
     while (running) {
@@ -2150,13 +3185,8 @@ static void *d2_render_thread_main(void *userdata)
                 struct d2_screen_state *state = &d2_screen_state[player];
                 float displayed_position = d2_effective_position(state);
                 char deck_title[80] = {0};
-                snprintf(deck_title, sizeof(deck_title), "%s", state->title);
-                char *mix_suffix = strpbrk(deck_title, "([{");
-                if (mix_suffix)
-                    *mix_suffix = '\0';
-                size_t title_len = strlen(deck_title);
-                while (title_len > 0 && deck_title[title_len - 1] == ' ')
-                    deck_title[--title_len] = '\0';
+                d2_visible_deck_title(deck_title, sizeof(deck_title),
+                                      state->title);
 
                 int accent_r = player == 1 ? 220 : 40;
                 int accent_g = player == 1 ? 40 : 120;
@@ -2180,6 +3210,7 @@ static void *d2_render_thread_main(void *userdata)
                                            &deadline, NULL);
         } while (sleep_result == EINTR && running);
     }
+    d2_font_shutdown();
     return NULL;
 }
 
@@ -2216,6 +3247,8 @@ static int32_t screen_callback(
             fflush(stdout);
         }
     }
+    if (player < 1 || player > 2)
+        return 0;
 
     /*
      * ------------------------------------------------------------
@@ -2232,45 +3265,8 @@ static int32_t screen_callback(
     int accent_r = (player == 1) ? 220 : 40;
     int accent_g = (player == 1) ? 40  : 120;
     int accent_b = (player == 1) ? 40  : 230;
-    struct d2_screen_state *state =
-        (player >= 1 && player <= 2) ? &d2_screen_state[player] : NULL;
-    /* This value is deliberately evaluated once per rendered frame. */
-    float displayed_position = d2_effective_position(state);
-    char deck_title[80] = {0};
-    if (state) {
-        snprintf(deck_title, sizeof(deck_title), "%s", state->title);
-        char *mix_suffix = strpbrk(deck_title, "([{");
-        if (mix_suffix)
-            *mix_suffix = '\0';
-        size_t title_len = strlen(deck_title);
-        while (title_len > 0 && deck_title[title_len - 1] == ' ')
-            deck_title[--title_len] = '\0';
-    }
-    int progress_end = 20 + (int)(440.0f * displayed_position);
-    char bpm_text[16];
-    int bpm_tenths = (int)((state ? state->bpm : 0.0f) * 10.0f + 0.5f);
-    snprintf(bpm_text, sizeof(bpm_text), "%d.%d", bpm_tenths / 10, bpm_tenths % 10);
-    char remain_text[16];
-    int remain_seconds = (int)((state ? state->remaining : 0.0f) + 0.5f);
-    snprintf(remain_text, sizeof(remain_text), "%02d:%02d",
-            remain_seconds / 60, remain_seconds % 60);
-    enum d2_screen_view view =
-        (player >= 1 && player <= 2) ? d2_screen_view[player] : D2_VIEW_DECK;
-    const char *performance_heading =
-        view == D2_VIEW_HOTCUE ? "HOTCUE" :
-        view == D2_VIEW_LOOP ? "LOOP" :
-        view == D2_VIEW_FREEZE ? "FREEZE" :
-        view == D2_VIEW_BEATJUMP ? "BEATJUMP" : "SAMPLER";
-    const char *performance_line_1 =
-        view == D2_VIEW_BEATJUMP ? "-1  +1  -4  +4" :
-        "1/4  1/2  1  2";
-    const char *performance_line_2 =
-        view == D2_VIEW_BEATJUMP ? "-8  +8  -16  +16" :
-        "4  8  16  32";
-    const char *performance_line_3 =
-        view == D2_VIEW_BEATJUMP ? "PAD 1-8: BEAT JUMP" :
-        view == D2_VIEW_FREEZE ? "HOLD PAD: BEAT ROLL" :
-        "PAD 1-8: LOOP SIZE";
+    struct d2_screen_state *state = &d2_screen_state[player];
+    enum d2_screen_view view = d2_screen_view[player];
 
     /* The deck is the only continuously animated view.  Use the direct
      * compositor above rather than the old per-pixel UI predicate renderer. */
@@ -2283,6 +3279,7 @@ static int32_t screen_callback(
             memcpy(pixel_data, d2_render_buffer[player][front],
                    WIDTH * HEIGHT * 2);
             d2_usb_generation[player] = d2_render_generation[player];
+            d2_last_screen_view[player] = D2_VIEW_DECK;
             flush = 1;
         }
         pthread_mutex_unlock(&d2_frame_mutex);
@@ -2295,654 +3292,53 @@ static int32_t screen_callback(
         /* Browse is row-based and static between encoder/model updates. Do not
          * keep re-rasterizing and bulk-transferring the same 480x272 frame at
          * 60 Hz while Mixxx is enumerating a USB directory. */
+        uint64_t browse_now_us = d2_monotonic_us();
+        enum d2_browse_notice_kind browse_notice =
+            d2_active_browse_notice(player, browse_now_us);
         if (d2_load_library_browse_state())
             d2_browse_mark_dirty();
-        if (d2_browse_frame_valid[player] &&
-            d2_browse_rendered_generation[player] == d2_browse_generation)
+        if (d2_browse_frame_is_current(player))
             return 0;
         unsigned back = d2_render_buffer_index[player] ^ 1u;
         uint8_t *back_buffer = d2_render_buffer[player][back];
         d2_render_browse_fast(back_buffer, player, state);
+        if (browse_notice != D2_BROWSE_NOTICE_NONE)
+            d2_draw_browse_notice(back_buffer, browse_notice);
         memcpy(pixel_data, back_buffer, WIDTH * HEIGHT * 2);
         d2_render_buffer_index[player] = back;
         d2_browse_rendered_generation[player] = d2_browse_generation;
         d2_browse_frame_valid[player] = 1;
+        d2_last_screen_view[player] = D2_VIEW_BROWSE;
         return 1;
     }
 
-    for (int y = 0; y < HEIGHT; y++) {
-        for (int x = 0; x < WIDTH; x++) {
-
-            int r = 8;
-            int g = 8;
-            int b = 10;
-
-            /* Browse stays open after encoder touch and returns to Deck on Load. */
-            if (player >= 1 && player <= 2 &&
-                d2_screen_view[player] == D2_VIEW_BROWSE) {
-                r = 12;
-                g = 14;
-                b = 18;
-
-                if (y < 42) {
-                    r = 21;
-                    g = 23;
-                    b = 29;
-                }
-                if (y >= 39 && y < 42) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-                int browse_row = (y >= 48 && y < 228) ? (y - 48) / 36 : -1;
-                if (x < 140 && y >= 42 && y < 240) {
-                    r = 15;
-                    g = 18;
-                    b = 23;
-                }
-                if (x >= 140 && x < 478 && browse_row >= 0) {
-                    int selected = (!state || !state->browse_focus) && browse_row == 2;
-                    r = selected ? 32 : 18;
-                    g = selected ? 38 : 20;
-                    b = selected ? 48 : 26;
-                }
-                if (x == 0 || x == WIDTH - 1 || y == 0 || y == HEIGHT - 1 ||
-                    x == 139 ||
-                    (x >= 140 && x < 478 && y >= 48 && y <= 228 &&
-                     ((y - 48) % 36 == 0 || y == 227))) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-                if (x >= 7 && x < 133 && y >= 76 && y < 99 &&
-                    state && state->browse_focus) {
-                    r = accent_r / 3;
-                    g = accent_g / 3;
-                    b = accent_b / 3;
-                }
-                if (d2_text_pixel("BROWSE", x, y, 18, 9, 3) ||
-                    d2_text_pixel("LIBRARY", x, y, 8, 48, 1) ||
-                    d2_text_pixel("TRACKS", x, y, 18, 82, 1) ||
-                    d2_text_pixel("PLAYLISTS", x, y, 18, 112, 1) ||
-                    d2_text_pixel("CRATES", x, y, 18, 142, 1) ||
-                    d2_text_pixel("FILES", x, y, 18, 172, 1) ||
-                    d2_text_pixel("TITLE / ARTIST", x, y, 148, 48, 1) ||
-                    d2_text_pixel("TURN SELECT  PRESS LOAD", x, y, 146, 246, 1)) {
-                    r = 235;
-                    g = 235;
-                    b = 242;
-                }
-                for (int row = 0; row < 5; row++) {
-                    if (x >= 148 && x < 472 &&
-                        d2_text_pixel(d2_browse_entries[row].title, x, y,
-                                      148, 59 + row * 36, 1)) {
-                        int selected = (!state || !state->browse_focus) && row == 2;
-                        r = selected ? 255 : 190;
-                        g = selected ? 210 : 200;
-                        b = selected ? 80 : 215;
-                    }
-                }
-                if (browse_row == 2 && x >= 142 && x < 148 &&
-                    d2_text_pixel(">", x, y, 142, 126, 1)) {
-                    r = 255;
-                    g = 210;
-                    b = 80;
-                }
-                rgb565(&pixel_data[(y * WIDTH + x) * 2], r, g, b);
-                continue;
-            }
-
-            if (view == D2_VIEW_HOTCUE || view == D2_VIEW_LOOP ||
-                view == D2_VIEW_SAMPLER || view == D2_VIEW_FREEZE ||
-                view == D2_VIEW_BEATJUMP) {
-                r = 12;
-                g = 14;
-                b = 18;
-                if (y < 62) {
-                    r = 21;
-                    g = 23;
-                    b = 29;
-                }
-                if (y >= 59 && y < 62) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-                if (view == D2_VIEW_HOTCUE || view == D2_VIEW_SAMPLER) {
-                    int grid_x = x - 20;
-                    int grid_y = y - 76;
-                    if (grid_x >= 0 && grid_x < 440 &&
-                        grid_y >= 0 && grid_y < 128) {
-                        int column = grid_x / 110;
-                        int row = grid_y / 64;
-                        int cell_x = grid_x % 110;
-                        int cell_y = grid_y % 64;
-                        if (column < 4 && row < 2 &&
-                            cell_x >= 4 && cell_x < 102 &&
-                            cell_y >= 4 && cell_y < 56) {
-                            int pad = row * 4 + column;
-                            uint32_t pad_rgb = d2_led_state[player].pad_rgb[pad];
-                            r = (int)((pad_rgb >> 16) & 0xff);
-                            g = (int)((pad_rgb >> 8) & 0xff);
-                            b = (int)(pad_rgb & 0xff);
-                            if (r + g + b < 18) r = g = b = 10;
-                            if (d2_text_pixel(d2_pad_labels[pad], x, y,
-                                              65 + column * 110,
-                                              94 + row * 64, 3)) {
-                                r = 250;
-                                g = 250;
-                                b = 255;
-                            }
-                        }
-                    }
-                } else {
-                    if (x >= 30 && x < 450 && y >= 84 && y < 120) {
-                        r = 55;
-                        g = 90;
-                        b = 180;
-                    }
-                    if (x >= 30 && x < 450 && y >= 132 && y < 168) {
-                        r = 80;
-                        g = 130;
-                        b = 205;
-                    }
-                    if (x >= 30 && x < 450 && y >= 180 && y < 216) {
-                        r = 45;
-                        g = 50;
-                        b = 62;
-                    }
-                    if (d2_text_pixel(performance_line_1, x, y, 52, 95, 2) ||
-                        d2_text_pixel(performance_line_2, x, y, 52, 143, 2) ||
-                        d2_text_pixel(performance_line_3, x, y, 52, 191, 2)) {
-                        r = 250;
-                        g = 250;
-                        b = 255;
-                    }
-                }
-                if (x == 0 || x == WIDTH - 1 || y == 0 || y == HEIGHT - 1) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-                if (d2_text_pixel(performance_heading, x, y, 18, 10, 3)) {
-                    r = 240;
-                    g = 240;
-                    b = 245;
-                }
-                if (state && d2_text_pixel(deck_title, x, y, 18, 42, 1)) {
-                    r = 180;
-                    g = 190;
-                    b = 205;
-                }
-                if (d2_text_pixel("DECK TO EXIT", x, y, 20, 240, 1)) {
-                    r = 150;
-                    g = 155;
-                    b = 165;
-                }
-                rgb565(&pixel_data[(y * WIDTH + x) * 2], r, g, b);
-                continue;
-            }
-
-            /*
-             * Track-deck layout inspired by the native Kontrol D2 display:
-             * title header, beat-grid waveform, transport readouts and a
-             * compact stripe waveform. Browse and performance views above
-             * remain separate screen modes.
-             */
-            if (view == D2_VIEW_DECK) {
-                unsigned wave_seed = 2166136261u;
-                const char *seed_text = state ? state->title : "MIXXX";
-                for (const char *p = seed_text; *p; ++p)
-                    wave_seed = (wave_seed ^ (unsigned char)*p) * 16777619u;
-                int waveform_center = 91;
-                char player_text[16];
-                char track_text[16];
-                snprintf(player_text, sizeof(player_text), "PLAYER %d", player);
-                snprintf(track_text, sizeof(track_text), "TRACK %02d", player);
-
-                r = 6;
-                g = 10;
-                b = 15;
-
-                /* Top title band and player identity chip. */
-                if (y < 29) {
-                    r = 17;
-                    g = 29;
-                    b = 43;
-                }
-                if (x >= 444 && y >= 5 && y < 22) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-                if (y == 28) {
-                    r = 110;
-                    g = 160;
-                    b = 200;
-                }
-
-                /* Loop-mode area and large scrolling waveform panel. */
-                if (x < 50 && y >= 34 && y < 128) {
-                    r = 19;
-                    g = 33;
-                    b = 47;
-                }
-                if (x >= 52 && x < 478 && y >= 38 && y < 132) {
-                    r = 7;
-                    g = 23;
-                    b = 38;
-                    int beat_x = x - 52;
-                    if (beat_x % 43 == 0 || beat_x % 43 == 1) {
-                        r = 42;
-                        g = 87;
-                        b = 117;
-                    }
-                    if (beat_x % 172 == 0 || beat_x % 172 == 1) {
-                        r = 105;
-                        g = 170;
-                        b = 205;
-                    }
-
-                    int amplitude;
-                    unsigned n0 = 0;
-                    int waveform_index = 0;
-                    if (d2_waveform_ready[player]) {
-                        /* A dense, fractional viewport follows the current
-                         * playback sample.  Linear interpolation removes the
-                         * 1-pixel bar pattern from the old renderer. */
-                        float source = displayed_position *
-                                       (D2_WAVEFORM_POINTS - 1) +
-                                       (beat_x - 213) * 2.15f;
-                        if (source < 0.0f) source = 0.0f;
-                        if (source > D2_WAVEFORM_POINTS - 1)
-                            source = D2_WAVEFORM_POINTS - 1;
-                        waveform_index = (int)source;
-                        int next_index = waveform_index + 1;
-                        if (next_index >= D2_WAVEFORM_POINTS)
-                            next_index = D2_WAVEFORM_POINTS - 1;
-                        float fraction = source - waveform_index;
-                        amplitude = (int)(d2_waveform[player][waveform_index] *
-                                          (1.0f - fraction) +
-                                          d2_waveform[player][next_index] * fraction);
-                        n0 = wave_seed + (unsigned)(waveform_index * 747796405u);
-                        n0 ^= n0 >> 15;
-                    } else {
-                        /* Fallback only while a newly loaded file is still
-                         * being decoded into its real waveform summary. */
-                        int sample_x = beat_x + (int)(displayed_position * 960.0f);
-                        int cell = sample_x / 8;
-                        int fraction = sample_x & 7;
-                        n0 = wave_seed + (unsigned)(cell * 747796405u);
-                        unsigned n1 = wave_seed +
-                                      (unsigned)((cell + 1) * 747796405u);
-                        n0 ^= n0 >> 15;
-                        n1 ^= n1 >> 15;
-                        int macro = cell % 31;
-                        if (macro < 0) macro += 31;
-                        int energy = macro < 16 ? macro : 31 - macro;
-                        int a0 = 8 + (int)(n0 % 24u) + energy;
-                        int a1 = 8 + (int)(n1 % 24u) + energy;
-                        amplitude = a0 + ((a1 - a0) * fraction) / 8;
-                    }
-                    int distance = y - waveform_center;
-                    if (distance < 0) distance = -distance;
-                    if (distance <= amplitude) {
-                        if (d2_waveform_ready[player] == 2) {
-                            /* Mixxx's low/mid/high analysis bands provide
-                             * the same track-specific colour variation as
-                             * the main Mixxx waveform. */
-                            int low = d2_waveform_low[player][waveform_index];
-                            int mid = d2_waveform_mid[player][waveform_index];
-                            int high = d2_waveform_high[player][waveform_index];
-                            r = 15 + low * 220 / 255 + mid * 25 / 255;
-                            g = 35 + low * 120 / 255 + mid * 125 / 255;
-                            b = 70 + mid * 80 / 255 + high * 165 / 255;
-                            if (r > 255) r = 255;
-                            if (g > 255) g = 255;
-                            if (b > 255) b = 255;
-                        } else {
-                            r = 20 + (int)(n0 % 18u);
-                            g = 125 + (int)(n0 % 62u);
-                            b = 218 + (int)(n0 % 30u);
-                        }
-                    }
-                }
-                /* Fixed red playhead like the native D2 display. */
-                if (x >= 238 && x <= 241 && y >= 32 && y < 136) {
-                    r = 248;
-                    g = 82;
-                    b = 76;
-                }
-                if (y == waveform_center && x >= 52 && x < 478 &&
-                    x != 238 && x != 239 && x != 240 && x != 241) {
-                    r = 45;
-                    g = 90;
-                    b = 112;
-                }
-
-                /* Lower transport-information section. */
-                if (y >= 137 && y < 191) {
-                    r = 10;
-                    g = 15;
-                    b = 21;
-                }
-                if (y == 136 || y == 191) {
-                    r = 47;
-                    g = 93;
-                    b = 126;
-                }
-
-                /* Overview/stripe waveform and timeline. */
-                if (x >= 18 && x < 462 && y >= 201 && y < 224) {
-                    r = 8;
-                    g = 26;
-                    b = 38;
-                    int stripe_x = x - 18;
-                    int stripe_height;
-                    if (d2_waveform_ready[player]) {
-                        int waveform_index = stripe_x * D2_WAVEFORM_POINTS / 444;
-                        stripe_height = d2_waveform[player][waveform_index] / 4;
-                    } else {
-                        int stripe_cell = stripe_x / 6;
-                        unsigned n = wave_seed +
-                                     (unsigned)(stripe_cell * 747796405u);
-                        n ^= n >> 15;
-                        stripe_height = 3 + (int)(n % 12u);
-                    }
-                    int stripe_distance = y - 212;
-                    if (stripe_distance < 0) stripe_distance = -stripe_distance;
-                    if (stripe_distance <= stripe_height) {
-                        r = 45;
-                        g = 175;
-                        b = 238;
-                    }
-                }
-                /* A thin playhead preserves the true overview waveform;
-                 * never fill the already-played area with a solid block. */
-                int overview_playhead = 18 + (int)(444.0f *
-                    displayed_position);
-                if (x >= overview_playhead - 1 && x <= overview_playhead + 1 &&
-                    y >= 198 && y < 229) {
-                    r = 250;
-                    g = 224;
-                    b = 90;
-                }
-                if (y >= 226 && y < 229 && x >= 18 && x < 462) {
-                    r = 27;
-                    g = 53;
-                    b = 70;
-                }
-                if (x >= 18 && x < 18 + (int)(444.0f *
-                    displayed_position) && y >= 226 && y < 229) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-
-                /* Footer controls. */
-                if (y >= 236) {
-                    r = 13;
-                    g = 20;
-                    b = 28;
-                }
-                if (x == 0 || x == WIDTH - 1 || y == 0 || y == HEIGHT - 1) {
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-
-                if (state && d2_text_pixel(deck_title, x, y, 18, 7, 2)) {
-                    r = 238; g = 244; b = 248;
-                }
-                if (d2_text_pixel(player_text, x, y, 448, 9, 1)) {
-                    r = 8; g = 12; b = 18;
-                }
-                if (d2_text_pixel("LOOP", x, y, 8, 42, 1) ||
-                    d2_text_pixel("MODE", x, y, 8, 53, 1) ||
-                    d2_text_pixel("1 BEAT", x, y, 58, 47, 1) ||
-                    d2_text_pixel("4 BEAT", x, y, 302, 47, 1)) {
-                    r = 218; g = 231; b = 240;
-                }
-                if (d2_text_pixel(player_text, x, y, 12, 143, 1) ||
-                    d2_text_pixel(track_text, x, y, 64, 143, 1) ||
-                    d2_text_pixel("REMAIN", x, y, 146, 143, 1) ||
-                    d2_text_pixel("TEMPO", x, y, 312, 143, 1) ||
-                    d2_text_pixel("BPM", x, y, 421, 143, 1)) {
-                    r = 139; g = 180; b = 205;
-                }
-                if (d2_text_pixel(player == 1 ? "1" : "2", x, y, 22, 157, 3) ||
-                    d2_text_pixel(player == 1 ? "01" : "02", x, y, 73, 157, 3) ||
-                    d2_text_pixel(remain_text, x, y, 143, 157, 3) ||
-                    d2_text_pixel("+00.00", x, y, 307, 158, 2) ||
-                    d2_text_pixel(bpm_text, x, y, 417, 157, 3)) {
-                    r = 240; g = 247; b = 250;
-                }
-                if (d2_text_pixel(state && state->playing ? "PLAYING" : "PAUSED",
-                                  x, y, 18, 180, 1) ||
-                    d2_text_pixel("NEEDLE COUNT DOWN", x, y, 165, 231, 1) ||
-                    d2_text_pixel("QUANTIZE", x, y, 7, 244, 1) ||
-                    d2_text_pixel("1/2", x, y, 17, 256, 2) ||
-                    d2_text_pixel("LOOP", x, y, 410, 244, 1) ||
-                    d2_text_pixel("1/32", x, y, 403, 256, 2)) {
-                    r = state && state->playing ? 85 : 170;
-                    g = state && state->playing ? 235 : 185;
-                    b = state && state->playing ? 135 : 195;
-                }
-                rgb565(&pixel_data[(y * WIDTH + x) * 2], r, g, b);
-                continue;
-            }
-
-            /*
-             * Header
-             */
-            if (y < 76) {
-                r = 18;
-                g = 18;
-                b = 22;
-            }
-
-            /*
-             * Accent line under header
-             */
-            if (y >= 73 && y < 76) {
-                r = accent_r;
-                g = accent_g;
-                b = accent_b;
-            }
-
-            /*
-             * Main waveform area
-             */
-            if (x >= 18 && x < 462 &&
-                y >= 78 && y < 172) {
-
-                r = 15;
-                g = 15;
-                b = 18;
-            }
-
-            /*
-             * Fake waveform.
-             * Deterministic bars, just for UI testing.
-             */
-            if (x >= 22 && x < 458 &&
-                y >= 82 && y < 168) {
-
-                int center = 125;
-
-                /*
-                 * Create a repeating waveform shape.
-                 */
-                int phase = (x * 7) % 64;
-                int height = 8 + ((phase < 32) ? phase : 64 - phase);
-
-                if (y >= center - height &&
-                    y <= center + height) {
-
-                    r = accent_r;
-                    g = accent_g;
-                    b = accent_b;
-                }
-            }
-
-            /*
-             * Waveform center line
-             */
-            if (y == 125) {
-                r = 80;
-                g = 80;
-                b = 85;
-            }
-
-            /*
-             * Progress bar background
-             */
-            if (x >= 20 && x < 460 &&
-                y >= 188 && y < 196) {
-
-                r = 35;
-                g = 35;
-                b = 40;
-            }
-
-            /* Progress is fed by D2|deck|POS|0.0..1.0 SysEx. */
-            if (x >= 20 && x < progress_end &&
-                y >= 188 && y < 196) {
-
-                r = accent_r;
-                g = accent_g;
-                b = accent_b;
-            }
-
-            /*
-             * Play indicator area
-             */
-            if (x >= 185 && x < 295 &&
-                y >= 213 && y < 258) {
-
-                r = 18;
-                g = 18;
-                b = 22;
-            }
-
-            /*
-             * PLAY triangle
-             */
-            int px = x - 215;
-            int py = y - 221;
-
-            if (px >= 0 && px < 30 &&
-                py >= 0 && py < 30) {
-
-                int triangle_width =
-                    2 * py;
-
-                if (px >= 5 &&
-                    px <= triangle_width &&
-                    py < 15) {
-
-                    if (state && state->playing) {
-                        r = 80;
-                        g = 255;
-                        b = 100;
-                    } else {
-                        r = 70;
-                        g = 70;
-                        b = 75;
-                    }
-                }
-            }
-
-            /*
-             * Cue indicator
-             */
-            if ((x >= 315 && x < 335) &&
-                (y >= 225 && y < 245)) {
-
-                r = 255;
-                g = 190;
-                b = 30;
-            }
-
-            /*
-             * Sync indicator
-             */
-            if ((x >= 355 && x < 375) &&
-                (y >= 225 && y < 245)) {
-
-                r = 80;
-                g = 180;
-                b = 255;
-            }
-
-            /*
-             * Outer border
-             */
-            if (x == 0 || x == WIDTH - 1 ||
-                y == 0 || y == HEIGHT - 1) {
-
-                r = accent_r;
-                g = accent_g;
-                b = accent_b;
-            }
-
-            /* Large live BPM readout in the header. */
-            if (d2_text_pixel("BPM", x, y, 18, 15, 2)) {
-                r = 145;
-                g = 150;
-                b = 160;
-            }
-            if (d2_text_pixel(bpm_text, x, y, 70, 7, 4)) {
-                r = 240;
-                g = 240;
-                b = 245;
-            }
-
-            /* Large, stable main title; detailed mix/version stays in Browse. */
-            if (state && x >= 18 && x < 460 &&
-                d2_text_pixel(deck_title, x, y, 18, 45, 2)) {
-                r = 235;
-                g = 235;
-                b = 240;
-            }
-            if (state && d2_text_pixel(state->artist, x, y, 20, 63, 1)) {
-                r = 150;
-                g = 155;
-                b = 165;
-            }
-
-            if (d2_text_pixel("REMAIN", x, y, 20, 216, 1)) {
-                r = 145;
-                g = 150;
-                b = 160;
-            }
-            if (d2_text_pixel(remain_text, x, y, 20, 229, 3)) {
-                r = 240;
-                g = 240;
-                b = 245;
-            }
-
-            /* A clear, unambiguous state label beneath the transport triangle. */
-            if (d2_text_pixel(state && state->playing ? "PLAYING" : "PAUSED",
-                              x, y, 198, 244, 2)) {
-                if (state && state->playing) {
-                    r = 80;
-                    g = 255;
-                    b = 100;
-                } else {
-                    r = 105;
-                    g = 105;
-                    b = 112;
-                }
-            }
-
-            rgb565(
-                &pixel_data[(y * WIDTH + x) * 2],
-                r, g, b);
-        }
+    if (d2_is_performance_view(view)) {
+        /* Performance views are static except for their eight live pad
+         * colors. Keeping HOTCUE and SAMPLER on this same fast compositor is
+         * important: the legacy per-pixel glyph predicate loop could delay
+        * physical input while either of those views was open. */
+        char performance_title[80] = {0};
+        uint32_t pad_rgb[8];
+        if (!d2_try_performance_snapshot(
+                player, performance_title, sizeof(performance_title),
+                pad_rgb))
+            return 0;
+        struct d2_performance_visible_state visible;
+        d2_make_performance_visible_state(
+            &visible, view, performance_title, pad_rgb);
+        if (d2_performance_frame_is_current(player, &visible))
+            return 0;
+        d2_render_dynamic_performance_view(pixel_data, view,
+                                           performance_title,
+                                           pad_rgb,
+                                           accent_r, accent_g, accent_b);
+        d2_commit_performance_frame(player, &visible);
+        return 1;
     }
 
-    return 1;
+    /* Every declared screen view returned through its dedicated compositor.
+     * Reject an invalid enum instead of reviving the obsolete per-pixel UI. */
+    return 0;
 }
 
 
@@ -2968,6 +3364,20 @@ static int d2_player_from_dev(struct ctlra_dev_t *dev)
     return 0;
 }
 
+#define D2_BROWSE_MAX_STEPS_PER_REPORT 16
+
+/* Preserve the magnitude reported by libctlra so a fast turn or a wrapped
+ * nibble advances the Mixxx selection by the same number of detents.  The
+ * bound prevents a corrupt USB report from flooding the MIDI queue. */
+static int d2_browse_delta_steps(int delta)
+{
+    if (delta > D2_BROWSE_MAX_STEPS_PER_REPORT)
+        return D2_BROWSE_MAX_STEPS_PER_REPORT;
+    if (delta < -D2_BROWSE_MAX_STEPS_PER_REPORT)
+        return -D2_BROWSE_MAX_STEPS_PER_REPORT;
+    return delta;
+}
+
 static void event_callback_locked(
     struct ctlra_dev_t *dev,
     uint32_t num_events,
@@ -2979,6 +3389,10 @@ static void event_callback_locked(
      * Ignore that trailing touch briefly so Load -> Deck cannot be raced
      * back into Browse by the same physical gesture. */
     static uint64_t browse_touch_block_until_us[3] = {0, 0, 0};
+    /* Focus can change as soon as Note 61 opens a sidebar item.  Latch the
+     * chosen note at press time so its release always closes the same MIDI
+     * control instead of accidentally releasing Note 62. */
+    static uint8_t browse_press_note[3] = {0, 0, 0};
 
     D2_EVENT_LOG("EVENT FROM PLAYER %d DEV=%p\\n",
                  d2_player_from_dev(dev), (void *)dev);
@@ -3014,8 +3428,8 @@ static void event_callback_locked(
              * ctlra ID 26 = Browse Encoder Touch
              *
              * Touch must NOT generate MIDI.
-             * Press is mapped to MIDI Note 62 so Mixxx can
-             * use it as LoadSelectedTrack for the corresponding deck.
+             * Press is Note 61 while the Library tree has focus (open folder)
+             * and Note 62 while the track table has focus (native load).
              */
             if (e->button.id == 26) {
 
@@ -3032,6 +3446,7 @@ static void event_callback_locked(
                         D2_EVENT_FLUSH();
                         continue;
                     }
+                    d2_clear_browse_notice(player);
                     /* The Pioneered tab control toggles. The library is
                      * global, so switching from one D2 to the other must
                      * keep it open instead of sending a second toggle. */
@@ -3055,7 +3470,10 @@ static void event_callback_locked(
 
             } else if (e->button.id == 25) {
 
+                int browse_note;
+
                 if (player >= 1 && player <= 2 && e->button.pressed) {
+                    d2_clear_browse_notice(player);
                     struct timespec press_ts;
                     clock_gettime(CLOCK_MONOTONIC, &press_ts);
                     browse_touch_block_until_us[player] =
@@ -3075,23 +3493,32 @@ static void event_callback_locked(
                         d2_screen_view[player] = D2_VIEW_BROWSE;
                         d2_browse_mark_dirty();
                     }
+                    browse_note =
+                        d2_screen_state[player].browse_focus ? 61 : 62;
+                    browse_press_note[player] = (uint8_t)browse_note;
+                } else {
+                    browse_note = browse_press_note[player] ?
+                        browse_press_note[player] :
+                        (d2_screen_state[player].browse_focus ? 61 : 62);
+                    browse_press_note[player] = 0;
                 }
 
-                midi_note(
-                    midi_channel,
-                    62,
-                    e->button.pressed ? 127 : 0);
+                midi_note(midi_channel, browse_note,
+                          e->button.pressed ? 127 : 0);
 
                 D2_EVENT_LOG(
-                    "BROWSE PRESS PLAYER %d CH %d NOTE 62 %s\\n",
+                    "BROWSE PRESS PLAYER %d CH %d NOTE %d %s\\n",
                     player,
                     midi_channel + 1,
+                    browse_note,
                     e->button.pressed ? "ON" : "OFF");
 
             } else if (e->button.id == 27) {
 
                 /* Back changes Library focus between the tree and track list.
                  * It deliberately keeps both the D2 and touchscreen in Browse. */
+                if (e->button.pressed)
+                    d2_clear_browse_notice(player);
                 midi_note(midi_channel, 63,
                           e->button.pressed ? 127 : 0);
                 D2_EVENT_LOG("BROWSE BACK PLAYER %d -> LIBRARY FOCUS %s\\n",
@@ -3176,52 +3603,11 @@ static void event_callback_locked(
 
             if (delta != 0) {
 
-                /*
-                 * D2 Browse encoder (id=4):
-                 * suppress only extremely-close duplicate events.
-                 *
-                 * Measurements showed duplicate events as close as
-                 * 0.3 ms for one physical detent.
-                 * Use 30 ms: one physical detent can produce several reports
-                 * spaced farther apart than the old 5 ms filter.
-                 */
+                /* The driver already emits one event for each changed Browse
+                 * nibble.  A time filter here drops legitimate rapid detents,
+                 * so no event is suppressed or coalesced in the bridge. */
                 if (e->encoder.id == 4) {
-                    static int browse_last_delta[2] = {0, 0};
-                    static uint64_t browse_last_us[2] = {0, 0};
-
-                    int pidx = player - 1;
-
-                    struct timespec ts;
-                    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-                    uint64_t now_us =
-                        ((uint64_t)ts.tv_sec * 1000000ULL) +
-                        ((uint64_t)ts.tv_nsec / 1000ULL);
-
-                    D2_EVENT_LOG(
-                        "BROWSE DEBUG PLAYER %d delta=%d last_delta=%d now_us=%llu last_us=%llu diff=%llu\\n",
-                        player,
-                        delta,
-                        browse_last_delta[pidx],
-                        (unsigned long long)now_us,
-                        (unsigned long long)browse_last_us[pidx],
-                        (unsigned long long)(now_us - browse_last_us[pidx]));
-
-                    if (browse_last_delta[pidx] == delta &&
-                        (now_us - browse_last_us[pidx]) < 30000ULL) {
-
-                        D2_EVENT_LOG(
-                            "BROWSE 30MS FILTER PLAYER %d delta=%d suppressed (%lluus)\\n",
-                            player,
-                            delta,
-                            (unsigned long long)(now_us - browse_last_us[pidx]));
-
-                        browse_last_us[pidx] = now_us;
-                        continue;
-                    }
-
-                    browse_last_delta[pidx] = delta;
-                    browse_last_us[pidx] = now_us;
+                    d2_clear_browse_notice(player);
                 }
 
                 /*
@@ -3236,19 +3622,21 @@ static void event_callback_locked(
                  */
                 int cc = 16 + e->encoder.id;
 
-                midi_cc(
-                    midi_channel,
-                    cc,
-                    value);
+                int step_delta = e->encoder.id == 4 ?
+                    d2_browse_delta_steps(delta) : (delta > 0 ? 1 : -1);
+                int step_count = step_delta > 0 ? step_delta : -step_delta;
+                for (int step = 0; step < step_count; ++step)
+                    midi_cc(midi_channel, cc, value);
 
                 D2_EVENT_LOG(
-                    "MIDI PLAYER %d CH %d ENCODER id=%u CC=%d VALUE=%d delta=%d\n",
+                    "MIDI PLAYER %d CH %d ENCODER id=%u CC=%d VALUE=%d delta=%d steps=%d\n",
                     player,
                     midi_channel + 1,
                     e->encoder.id,
                     cc,
                     value,
-                    delta);
+                    delta,
+                    step_count);
             }
 
             D2_EVENT_FLUSH();
@@ -3328,9 +3716,17 @@ static void feedback_callback(
     const uint32_t dim = 0x08000000U;
     const uint32_t bright = 0x7f000000U;
     const uint32_t blue_active = 0x7f0000ffU;
+    const uint32_t amber_active = 0x7fff7800U;
 
     for (uint32_t i = 0; i < NI_KONTROL_D2_LED_COUNT; i++)
         ctlra_dev_light_set(dev, i, off);
+
+    if (!led->outputs_enabled) {
+        uint8_t dark[25] = {0};
+        ni_kontrol_d2_light_touchstrip(dev, dark, dark);
+        ctlra_dev_light_flush(dev, 0);
+        return;
+    }
 
     for (int pad = 0; pad < 8; ++pad) {
         uint32_t rgb = led->pad_rgb[pad] & 0x00ffffffU;
@@ -3338,7 +3734,8 @@ static void feedback_callback(
                             rgb ? (0x7f000000U | rgb) : off);
     }
 
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FX_SELECT, bright);
+    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FX_SELECT,
+                        led->fx_unit == 2 ? amber_active : blue_active);
     for (int fx = 0; fx < 4; ++fx)
         ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FX_1 + fx,
                             led->fx_enabled[fx] ? bright : dim);
@@ -3361,7 +3758,8 @@ static void feedback_callback(
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_BACK,
                         d2_screen_view[player] == D2_VIEW_BROWSE ? bright : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_CAPTURE, dim);
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_EDIT, dim);
+    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_EDIT,
+                        screen->beatgrid_edit ? bright : dim);
     for (int strip = 0; strip < 4; ++strip)
         ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_ON_1 + strip,
                             led->performance_on[strip] ? bright : dim);
@@ -3371,7 +3769,7 @@ static void feedback_callback(
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_LOOP,
                         led->mode == 2 ? blue_active : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FREEZE,
-                        led->mode == 3 || led->mode == 5 ? blue_active : dim);
+                        led->mode == 3 ? blue_active : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_REMIX,
                         led->mode == 4 ? blue_active : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FLUX,
@@ -3405,7 +3803,9 @@ static void feedback_callback(
     if (led->flux)
         orange[marker] = 127;
     ni_kontrol_d2_light_touchstrip(dev, orange, blue);
-    ctlra_dev_light_flush(dev, 1);
+    /* The driver compares the finished LED report with the last submitted
+     * one. Do not force an identical interrupt OUT write every 10 ms. */
+    ctlra_dev_light_flush(dev, 0);
 }
 
 static int accept_device(
@@ -3434,10 +3834,18 @@ static int accept_device(
     if (d2_map_count < 2) {
         d2_map[d2_map_count].dev = dev;
         d2_map[d2_map_count].player = 2 - d2_map_count;
+        int player = d2_map[d2_map_count].player;
+
+        /* A reconnected D2 has no physical copy of the process-local cached
+         * frame. Force the first Browser/Performance callback to submit a
+         * complete image instead of trusting stale cache metadata. */
+        d2_last_screen_view[player] = -1;
+        d2_performance_frame_valid[player] = 0;
+        d2_browse_frame_valid[player] = 0;
 
         printf("D2 PLAYER MAP: dev=%p -> Player %d\n",
                (void *)dev,
-               d2_map[d2_map_count].player);
+               player);
         fflush(stdout);
 
         d2_map_count++;
@@ -3451,11 +3859,17 @@ static int accept_device(
 }
 
 
-static int d2_render_test_image(const char *path)
+static int d2_render_test_image(const char *path, int use_beatmap)
 {
     uint8_t *pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
-    if (!pixels)
+    struct d2_track_assets *assets = calloc(1, sizeof(*assets));
+    if (!pixels || !assets) {
+        free(pixels);
+        free(assets);
         return 1;
+    }
+    d2_track_assets[1] = assets;
+    d2_bind_asset_slot(1, assets);
     for (int i = 0; i < D2_WAVEFORM_POINTS; ++i) {
         float phase = (float)i * 0.015f;
         float pulse = powf(fmaxf(0.0f, sinf(phase)), 3.0f);
@@ -3470,7 +3884,8 @@ static int d2_render_test_image(const char *path)
         .bpm = 128.0f, .position = 0.42f, .remaining = 203.456f,
         .duration = 420.0f, .rate = 1.0241f, .beatgrid_valid = 1,
         .phase_master = 0.18f, .phase_active = 0.42f,
-        .phase_master_step = 0, .phase_active_step = 1, .phase_valid = 1,
+        .phase_master_step = 0, .phase_active_step = 1,
+        .phase_master_deck = 1, .phase_follower_deck = 2, .phase_valid = 1,
         .visual_key = 20, .loop_size = 16.0f, .quantize = 1, .keylock = 1,
         .beatgrid_first_position = 0.001f,
         .beatgrid_interval = 60.0f / (128.0f * 420.0f),
@@ -3479,6 +3894,19 @@ static int d2_render_test_image(const char *path)
         .artist = "NEXUS D2 PLAYER", .musical_key = "4A",
         .hotcue_position = {0.03f, 0.18f, 0.42f, 0.58f, 0.76f, -1, -1, -1},
     };
+    if (use_beatmap) {
+        static const float irregular[] = {
+            0.4130f, 0.4162f, 0.4200f, 0.4231f, 0.4274f,
+        };
+        state.beatgrid_ready = 0;
+        state.beatmap_ready = 1;
+        state.beatmap_count =
+            (int)(sizeof(irregular) / sizeof(irregular[0]));
+        for (int i = 0; i < state.beatmap_count; ++i) {
+            state.beatmap_position[i] = irregular[i];
+            state.beatmap_source_index[i] = i;
+        }
+    }
     d2_led_state[1].loop = 1;
     d2_led_state[1].sync = 1;
     d2_render_deck_fast(pixels, 1, &state, state.position, state.title,
@@ -3486,6 +3914,9 @@ static int d2_render_test_image(const char *path)
     FILE *output = fopen(path, "wb");
     if (!output) {
         free(pixels);
+        d2_track_assets[1] = NULL;
+        d2_bind_asset_slot(1, NULL);
+        free(assets);
         return 1;
     }
     fprintf(output, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
@@ -3500,10 +3931,14 @@ static int d2_render_test_image(const char *path)
     }
     fclose(output);
     free(pixels);
+    d2_track_assets[1] = NULL;
+    d2_bind_asset_slot(1, NULL);
+    free(assets);
     return 0;
 }
 
-static int d2_render_browse_test_image(const char *path, int browse_focus)
+static int d2_render_browse_test_image(const char *path, int browse_focus,
+                                       enum d2_browse_notice_kind notice)
 {
     uint8_t *pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
     if (!pixels)
@@ -3529,9 +3964,12 @@ static int d2_render_browse_test_image(const char *path, int browse_focus)
         snprintf(entry->musical_key, sizeof(entry->musical_key), "%s", keys[row]);
         entry->bpm = row < 4 ? 123.0f + row : 125.0f;
         entry->rating = row == D2_BROWSE_ROWS / 2 ? 5 : 3;
+        entry->available = 1;
     }
     struct d2_screen_state state = {.browse_focus = browse_focus};
     d2_render_browse_fast(pixels, 1, &state);
+    if (notice != D2_BROWSE_NOTICE_NONE)
+        d2_draw_browse_notice(pixels, notice);
     FILE *output = fopen(path, "wb");
     if (!output) {
         free(pixels);
@@ -3552,6 +3990,1083 @@ static int d2_render_browse_test_image(const char *path, int browse_focus)
     return 0;
 }
 
+static int d2_render_performance_test_image(const char *path)
+{
+    uint8_t *pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
+    if (!pixels)
+        return 1;
+    struct d2_screen_state state = {
+        .title = "PERFORMANCE FEEDBACK",
+        .artist = "MIXXX",
+    };
+    static const uint32_t colors[8] = {
+        0x042010U, 0x042010U, 0x087030U, 0x042010U,
+        0x00ff60U, 0x042010U, 0x042010U, 0x042010U,
+    };
+    memcpy(d2_led_state[1].pad_rgb, colors, sizeof(colors));
+    d2_render_dynamic_performance_view(pixels, D2_VIEW_LOOP, state.title,
+                                       colors, 220, 40, 40);
+
+    FILE *output = fopen(path, "wb");
+    if (!output) {
+        free(pixels);
+        return 1;
+    }
+    fprintf(output, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
+    for (int i = 0; i < WIDTH * HEIGHT; ++i) {
+        uint16_t color = ((uint16_t)pixels[i * 2] << 8) |
+                         pixels[i * 2 + 1];
+        unsigned char rgb[3] = {
+            (unsigned char)(((color >> 11) & 31) * 255 / 31),
+            (unsigned char)(((color >> 5) & 63) * 255 / 63),
+            (unsigned char)((color & 31) * 255 / 31),
+        };
+        fwrite(rgb, 1, sizeof(rgb), output);
+    }
+    fclose(output);
+    free(pixels);
+    return 0;
+}
+
+static void d2_parse_test_message(const char *message)
+{
+    unsigned char sysex[256];
+    size_t length = strlen(message);
+    if (length + 3 > sizeof(sysex))
+        return;
+    sysex[0] = 0xF0;
+    sysex[1] = 0x7D;
+    memcpy(sysex + 2, message, length);
+    sysex[length + 2] = 0xF7;
+    d2_parse_sysex(sysex, (uint32_t)(length + 3));
+}
+
+static int d2_test_white_ink_bounds(const uint8_t *pixels,
+                                    int x0, int y0, int width, int height,
+                                    int *min_x, int *min_y,
+                                    int *max_x, int *max_y)
+{
+    int found = 0;
+    *min_x = x0 + width;
+    *min_y = y0 + height;
+    *max_x = x0 - 1;
+    *max_y = y0 - 1;
+    for (int y = y0; y < y0 + height; ++y) {
+        for (int x = x0; x < x0 + width; ++x) {
+            size_t offset = ((size_t)y * WIDTH + x) * 2;
+            uint16_t color = ((uint16_t)pixels[offset] << 8) |
+                             pixels[offset + 1];
+            int r = ((color >> 11) & 0x1f) * 255 / 31;
+            int g = ((color >> 5) & 0x3f) * 255 / 63;
+            int b = (color & 0x1f) * 255 / 31;
+            if (r < 180 || g < 180 || b < 180)
+                continue;
+            if (x < *min_x) *min_x = x;
+            if (x > *max_x) *max_x = x;
+            if (y < *min_y) *min_y = y;
+            if (y > *max_y) *max_y = y;
+            found = 1;
+        }
+    }
+    return found;
+}
+
+static uint64_t d2_test_region_hash(const uint8_t *pixels,
+                                    int x0, int y0, int width, int height)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (int y = y0; y < y0 + height; ++y) {
+        const uint8_t *row = &pixels[((size_t)y * WIDTH + x0) * 2];
+        for (int byte = 0; byte < width * 2; ++byte) {
+            hash ^= row[byte];
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash;
+}
+
+static uint64_t d2_test_render_hud_region(uint8_t *pixels,
+                                          int x, int y,
+                                          int width, int height)
+{
+    memset(pixels, 0, (size_t)WIDTH * HEIGHT * 2);
+    d2_render_deck_fast(pixels, 1, &d2_screen_state[1],
+                        d2_screen_state[1].position,
+                        d2_screen_state[1].title, 220, 40, 40);
+    return d2_test_region_hash(pixels, x, y, width, height);
+}
+
+static int d2_hud_parser_render_contract_test(uint8_t *pixels)
+{
+    struct d2_screen_state saved_state_1 = d2_screen_state[1];
+    struct d2_screen_state saved_state_2 = d2_screen_state[2];
+    struct d2_led_state saved_led_1 = d2_led_state[1];
+    struct d2_led_state saved_led_2 = d2_led_state[2];
+    uint8_t *saved_waveform = d2_waveform[1];
+    int saved_waveform_ready = d2_waveform_ready[1];
+    int saved_strip_ready = d2_wave_strip_ready[1];
+    int saved_cover_ready = d2_cover_art_ready[1];
+    uint8_t *test_waveform = calloc(D2_WAVEFORM_POINTS, 1);
+    const char *failure = NULL;
+
+    if (!test_waveform)
+        return 1;
+    for (int point = 0; point < D2_WAVEFORM_POINTS; ++point)
+        test_waveform[point] =
+            (uint8_t)(4 + ((point * 37U + (unsigned)(point >> 3) * 11U) % 42U));
+
+    d2_screen_state[1] = (struct d2_screen_state) {
+        .bpm = 120.0f,
+        .position = 0.25f,
+        .remaining = 180.0f,
+        .duration = 240.0f,
+        .rate = 1.0f,
+        .zoom_level = 2,
+        .loop_size = 4.0f,
+        .visual_key = 8,
+        .title = "BASE TRACK",
+        .artist = "BASE ARTIST",
+        .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1},
+    };
+    d2_led_state[1] = (struct d2_led_state) {
+        .outputs_enabled = 1,
+        .active_channel = 1,
+        .mode = 1,
+        .fx_unit = 1,
+        .performance_on = {1, 1, 1, 1},
+    };
+    d2_waveform[1] = test_waveform;
+    d2_waveform_ready[1] = 1;
+    d2_wave_strip_ready[1] = 0;
+    d2_cover_art_ready[1] = 0;
+
+    uint64_t before = d2_test_render_hud_region(pixels, 0, 0, 320, 18);
+    d2_parse_test_message("D2|1|TITLE|LIVE TRACK");
+    if (strcmp(d2_screen_state[1].title, "LIVE TRACK") != 0 ||
+        d2_test_render_hud_region(pixels, 0, 0, 320, 18) == before) {
+        failure = "hud-title";
+        goto cleanup;
+    }
+
+    uint64_t bpm_header_before =
+        d2_test_render_hud_region(pixels, 325, 0, 78, 18);
+    uint64_t bpm_hud_before =
+        d2_test_render_hud_region(pixels, 396, 195, 84, 43);
+    d2_parse_test_message("D2|1|BPM|129.57");
+    if (fabsf(d2_screen_state[1].bpm - 129.57f) > 0.001f ||
+        d2_test_render_hud_region(pixels, 325, 0, 78, 18) ==
+            bpm_header_before ||
+        d2_test_render_hud_region(pixels, 396, 195, 84, 43) ==
+            bpm_hud_before) {
+        failure = "hud-bpm";
+        goto cleanup;
+    }
+
+    uint64_t key_header_before =
+        d2_test_render_hud_region(pixels, 409, 0, 47, 18);
+    uint64_t key_hud_before =
+        d2_test_render_hud_region(pixels, 54, 195, 72, 43);
+    d2_parse_test_message("D2|1|KEYVISUAL|20");
+    if (d2_screen_state[1].visual_key != 20 ||
+        d2_test_render_hud_region(pixels, 409, 0, 47, 18) ==
+            key_header_before ||
+        d2_test_render_hud_region(pixels, 54, 195, 72, 43) ==
+            key_hud_before) {
+        failure = "hud-key";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 54, 195, 72, 15);
+    d2_parse_test_message("D2|1|KEYLOCK|1");
+    if (!d2_screen_state[1].keylock ||
+        d2_test_render_hud_region(pixels, 54, 195, 72, 15) == before) {
+        failure = "hud-keylock";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 126, 195, 42, 40);
+    d2_parse_test_message("D2|1|LOOPSIZE|16");
+    if (fabsf(d2_screen_state[1].loop_size - 16.0f) > 0.001f ||
+        d2_test_render_hud_region(pixels, 126, 195, 42, 40) == before) {
+        failure = "hud-loop-size";
+        goto cleanup;
+    }
+    before = d2_test_render_hud_region(pixels, 126, 195, 42, 40);
+    d2_parse_test_message("D2|1|LEDLOOP|1");
+    if (!d2_led_state[1].loop ||
+        d2_test_render_hud_region(pixels, 126, 195, 42, 40) == before) {
+        failure = "hud-loop-active";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 184, 195, 112, 43);
+    d2_parse_test_message("D2|1|TIMEMODE|1");
+    if (!d2_screen_state[1].time_mode ||
+        d2_test_render_hud_region(pixels, 184, 195, 112, 43) == before) {
+        failure = "hud-time-mode";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 232, 195, 80, 14);
+    d2_parse_test_message("D2|1|QUANTIZE|1");
+    if (!d2_screen_state[1].quantize ||
+        d2_test_render_hud_region(pixels, 232, 195, 80, 14) == before) {
+        failure = "hud-quantize";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 312, 195, 82, 43);
+    d2_parse_test_message("D2|1|RATE|1.02410");
+    if (fabsf(d2_screen_state[1].rate - 1.0241f) > 0.00001f ||
+        d2_test_render_hud_region(pixels, 312, 195, 82, 43) == before) {
+        failure = "hud-tempo";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 354, 195, 40, 16);
+    d2_parse_test_message("D2|1|LEDSYNC|1");
+    if (!d2_led_state[1].sync ||
+        d2_test_render_hud_region(pixels, 354, 195, 40, 16) == before) {
+        failure = "hud-sync";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 0, 49, 32, 14);
+    d2_parse_test_message("D2|1|ZOOM|8");
+    if (d2_screen_state[1].zoom_level != 8 ||
+        d2_test_render_hud_region(pixels, 0, 49, 32, 14) == before) {
+        failure = "hud-zoom";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 140, 18, 190, 31);
+    d2_parse_test_message("D2|1|PHASE|0.25,0.75,1,3,1,1,2");
+    if (!d2_screen_state[1].phase_valid ||
+        d2_screen_state[1].phase_master_step != 1 ||
+        d2_screen_state[1].phase_active_step != 3 ||
+        d2_test_render_hud_region(pixels, 140, 18, 190, 31) == before) {
+        failure = "hud-phase";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 0, 235, 480, 37);
+    d2_parse_test_message("D2|1|CUE1|0.750000");
+    d2_parse_test_message("D2|1|CUECOLOR1|16744448");
+    if (fabsf(d2_screen_state[1].hotcue_position[0] - 0.75f) > 0.00001f ||
+        d2_screen_state[1].hotcue_color[0] != 0xff8000U ||
+        d2_test_render_hud_region(pixels, 0, 235, 480, 37) == before) {
+        failure = "hud-hotcue";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 0, 235, 480, 37);
+    d2_parse_test_message("D2|1|POS|0.600000");
+    if (fabsf(d2_screen_state[1].position - 0.6f) > 0.00001f ||
+        d2_test_render_hud_region(pixels, 0, 235, 480, 37) == before) {
+        failure = "hud-playhead";
+        goto cleanup;
+    }
+
+    before = d2_test_render_hud_region(pixels, 184, 195, 112, 43);
+    d2_parse_test_message("D2|1|DURATION|300.000");
+    if (fabsf(d2_screen_state[1].duration - 300.0f) > 0.001f ||
+        d2_test_render_hud_region(pixels, 184, 195, 112, 43) == before) {
+        failure = "hud-duration";
+        goto cleanup;
+    }
+
+    d2_screen_state[1].position = 0.25f;
+    d2_screen_state[1].duration = 240.0f;
+    d2_screen_state[1].rate = 1.0f;
+    clock_gettime(CLOCK_MONOTONIC,
+                  &d2_screen_state[1].position_updated_at);
+    d2_screen_state[1].position_updated_at.tv_nsec -= 100000000L;
+    if (d2_screen_state[1].position_updated_at.tv_nsec < 0) {
+        --d2_screen_state[1].position_updated_at.tv_sec;
+        d2_screen_state[1].position_updated_at.tv_nsec += 1000000000L;
+    }
+    d2_parse_test_message("D2|1|PLAY|1");
+    if (!d2_screen_state[1].playing ||
+        d2_effective_position(&d2_screen_state[1]) <= 0.2501f) {
+        failure = "hud-transport-clock";
+        goto cleanup;
+    }
+
+    if (memcmp(&d2_screen_state[2], &saved_state_2,
+               sizeof(saved_state_2)) != 0 ||
+        memcmp(&d2_led_state[2], &saved_led_2,
+               sizeof(saved_led_2)) != 0) {
+        failure = "hud-deck-isolation";
+        goto cleanup;
+    }
+
+cleanup:
+    d2_screen_state[1] = saved_state_1;
+    d2_screen_state[2] = saved_state_2;
+    d2_led_state[1] = saved_led_1;
+    d2_led_state[2] = saved_led_2;
+    d2_waveform[1] = saved_waveform;
+    d2_waveform_ready[1] = saved_waveform_ready;
+    d2_wave_strip_ready[1] = saved_strip_ready;
+    d2_cover_art_ready[1] = saved_cover_ready;
+    free(test_waveform);
+    if (failure) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED %s\n", failure);
+        return 1;
+    }
+    return 0;
+}
+
+static int d2_load_reject_notice_test(void)
+{
+    const uint64_t start_us = 1000000ULL;
+    uint64_t initial_generation = d2_browse_generation;
+
+    d2_browse_notice_kind[1] = D2_BROWSE_NOTICE_NONE;
+    d2_browse_notice_kind[2] = D2_BROWSE_NOTICE_NONE;
+    d2_browse_notice_until_us[1] = 0;
+    d2_browse_notice_until_us[2] = 0;
+    d2_set_browse_notice(
+        1, D2_BROWSE_NOTICE_DECK_PLAYING, start_us);
+    if (d2_active_browse_notice(1, start_us) !=
+            D2_BROWSE_NOTICE_DECK_PLAYING ||
+        d2_active_browse_notice(2, start_us) != D2_BROWSE_NOTICE_NONE ||
+        d2_browse_generation == initial_generation) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED activation\n");
+        return 1;
+    }
+
+    uint64_t shown_generation = d2_browse_generation;
+    if (d2_active_browse_notice(
+                1, start_us + D2_BROWSE_NOTICE_US - 1) !=
+            D2_BROWSE_NOTICE_DECK_PLAYING ||
+        d2_browse_generation != shown_generation) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED early-expiry\n");
+        return 1;
+    }
+
+    if (d2_active_browse_notice(
+                1, start_us + D2_BROWSE_NOTICE_US) !=
+            D2_BROWSE_NOTICE_NONE ||
+        d2_browse_notice_kind[1] != D2_BROWSE_NOTICE_NONE ||
+        d2_browse_notice_until_us[1] != 0 ||
+        d2_browse_generation == shown_generation) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED expiry\n");
+        return 1;
+    }
+
+    d2_set_browse_notice(2, D2_BROWSE_NOTICE_TRACK_MISSING, start_us);
+    uint64_t second_generation = d2_browse_generation;
+    if (d2_active_browse_notice(2, start_us) !=
+            D2_BROWSE_NOTICE_TRACK_MISSING) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED kind\n");
+        return 1;
+    }
+    d2_clear_browse_notice(2);
+    if (d2_browse_notice_kind[2] != D2_BROWSE_NOTICE_NONE ||
+        d2_browse_notice_until_us[2] != 0 ||
+        d2_browse_generation == second_generation) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED clear\n");
+        return 1;
+    }
+
+    /* The most recent authoritative outcome replaces the previous one; no
+     * overlapping boxes or queued notices are allowed. */
+    d2_set_browse_notice(1, D2_BROWSE_NOTICE_TRACK_MISSING, start_us);
+    d2_set_browse_notice(1, D2_BROWSE_NOTICE_LOAD_FAILED, start_us + 10);
+    if (d2_active_browse_notice(1, start_us + 10) !=
+            D2_BROWSE_NOTICE_LOAD_FAILED ||
+        d2_browse_notice_until_us[1] !=
+            start_us + 10 + D2_BROWSE_NOTICE_US) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED replacement\n");
+        return 1;
+    }
+    d2_clear_browse_notice(1);
+
+    /* LOADFAIL is compositor feedback for an active Browse interaction, not
+     * state that may leak into Browse from an earlier Player-screen event. */
+    d2_screen_view[1] = D2_VIEW_DECK;
+    d2_parse_test_message("D2|1|LOADFAIL|MISSING");
+    if (d2_browse_notice_kind[1] != D2_BROWSE_NOTICE_NONE) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED view-gate\n");
+        return 1;
+    }
+    d2_screen_view[1] = D2_VIEW_BROWSE;
+    d2_parse_test_message("D2|1|LOADFAIL|MISSING");
+    if (d2_browse_notice_kind[1] != D2_BROWSE_NOTICE_TRACK_MISSING) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED missing-parser\n");
+        return 1;
+    }
+    d2_parse_test_message("D2|1|LOADFAIL|FAILED");
+    if (d2_browse_notice_kind[1] != D2_BROWSE_NOTICE_LOAD_FAILED) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED failed-parser\n");
+        return 1;
+    }
+    d2_parse_test_message("D2|1|VIEW|DECK");
+    if (d2_browse_notice_kind[1] != D2_BROWSE_NOTICE_NONE ||
+        d2_screen_view[1] != D2_VIEW_DECK) {
+        fprintf(stderr, "D2_LOAD_REJECT_NOTICE_TEST_FAILED success-clear\n");
+        return 1;
+    }
+
+    printf("D2_LOAD_REJECT_NOTICE_TEST_OK\n");
+    return 0;
+}
+
+static int d2_beat_geometry_test(void)
+{
+    const float play_position = 0.5f;
+    const float source_step = 32.0f;
+    const float one_pixel = source_step / (D2_WAVEFORM_POINTS - 1);
+    const float irregular[] = {
+        play_position - 7.0f * one_pixel,
+        play_position - 2.0f * one_pixel,
+        play_position,
+        play_position + 3.0f * one_pixel,
+        play_position + 11.0f * one_pixel,
+    };
+    const int expected[] = {233, 238, 240, 243, 251};
+
+    for (size_t i = 0; i < sizeof(irregular) / sizeof(irregular[0]); ++i) {
+        int x = d2_beat_position_to_x(
+                irregular[i], play_position, source_step);
+        if (x != expected[i]) {
+            fprintf(stderr,
+                    "D2_BEAT_GEOMETRY_TEST_FAILED index=%zu got=%d expected=%d\n",
+                    i, x, expected[i]);
+            return 1;
+        }
+    }
+    if (d2_beat_position_to_x(-0.01f, 0.0f, source_step) >= 240 ||
+        d2_beat_position_to_x(NAN, play_position, source_step) != -1 ||
+        d2_beat_position_to_x(play_position, play_position, 0.0f) != -1) {
+        fprintf(stderr, "D2_BEAT_GEOMETRY_TEST_FAILED bounds\n");
+        return 1;
+    }
+    printf("D2_BEAT_GEOMETRY_TEST_OK\n");
+    return 0;
+}
+
+struct d2_font_thread_test_context {
+    pthread_barrier_t barrier;
+    uint8_t *pixels;
+    int ready;
+    int width;
+    uintptr_t face_slot;
+    uintptr_t cache_slot;
+};
+
+static void d2_font_thread_test_draw(uint8_t *pixels)
+{
+    static const char title[] =
+        "CACHE \xC3\x87I\xC4\x9ELIK 128.00";
+    memset(pixels, 0, (size_t)WIDTH * HEIGHT * 2);
+    d2_draw_text(pixels, title, 12, 18, 1, 238, 240, 244);
+    d2_draw_text(pixels, title, 12, 52, 2, 0, 210, 238);
+    d2_draw_text_centered(pixels, title, WIDTH / 2, 96, 3,
+                          245, 150, 20);
+}
+
+static void *d2_font_thread_test_worker(void *userdata)
+{
+    struct d2_font_thread_test_context *context = userdata;
+    d2_font_init();
+    context->ready = d2_ft_ready;
+    context->face_slot = (uintptr_t)&d2_ft_face;
+    context->cache_slot = (uintptr_t)&d2_font_cache[0][0];
+    context->width = d2_measure_text_width(
+        "CACHE \xC3\x87I\xC4\x9ELIK 128.00", 2);
+    pthread_barrier_wait(&context->barrier);
+    d2_font_thread_test_draw(context->pixels);
+    d2_font_shutdown();
+    return NULL;
+}
+
+static int d2_font_thread_contract_test(void)
+{
+    struct d2_font_thread_test_context context = {0};
+    pthread_t worker;
+    uint8_t *main_pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
+    uint8_t *worker_pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
+    if (!main_pixels || !worker_pixels) {
+        free(main_pixels);
+        free(worker_pixels);
+        return 1;
+    }
+    context.pixels = worker_pixels;
+    if (pthread_barrier_init(&context.barrier, NULL, 2) != 0) {
+        free(main_pixels);
+        free(worker_pixels);
+        return 1;
+    }
+    if (pthread_create(&worker, NULL, d2_font_thread_test_worker,
+                       &context) != 0) {
+        pthread_barrier_destroy(&context.barrier);
+        free(main_pixels);
+        free(worker_pixels);
+        return 1;
+    }
+
+    uintptr_t main_face_slot = (uintptr_t)&d2_ft_face;
+    uintptr_t main_cache_slot = (uintptr_t)&d2_font_cache[0][0];
+    int main_ready = d2_ft_ready;
+    int main_width = d2_measure_text_width(
+        "CACHE \xC3\x87I\xC4\x9ELIK 128.00", 2);
+    pthread_barrier_wait(&context.barrier);
+    d2_font_thread_test_draw(main_pixels);
+    pthread_join(worker, NULL);
+    pthread_barrier_destroy(&context.barrier);
+
+    int failed = context.face_slot == main_face_slot ||
+        context.cache_slot == main_cache_slot ||
+        context.ready != main_ready || context.width != main_width ||
+        memcmp(main_pixels, worker_pixels,
+               (size_t)WIDTH * HEIGHT * 2) != 0;
+    free(main_pixels);
+    free(worker_pixels);
+    if (failed) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED font-thread-isolation\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int d2_performance_cache_contract_test(void)
+{
+    const char *failure = NULL;
+    struct d2_performance_visible_state saved_frame[3];
+    int saved_frame_valid[3];
+    int saved_last_view[3];
+    uint64_t saved_browse_rendered_generation[3];
+    int saved_browse_frame_valid[3];
+    uint64_t saved_browse_generation = d2_browse_generation;
+    uint32_t pads[8] = {
+        0x042010U, 0x042010U, 0x087030U, 0x042010U,
+        0x00ff60U, 0x042010U, 0x042010U, 0x042010U,
+    };
+    uint32_t changed_pads[8];
+    uint32_t upper_bits_only[8];
+    char title_a[80];
+    char title_b[80];
+
+    memcpy(saved_frame, d2_performance_frame, sizeof(saved_frame));
+    memcpy(saved_frame_valid, d2_performance_frame_valid,
+           sizeof(saved_frame_valid));
+    memcpy(saved_last_view, d2_last_screen_view, sizeof(saved_last_view));
+    memcpy(saved_browse_rendered_generation,
+           d2_browse_rendered_generation,
+           sizeof(saved_browse_rendered_generation));
+    memcpy(saved_browse_frame_valid, d2_browse_frame_valid,
+           sizeof(saved_browse_frame_valid));
+
+    memset(d2_performance_frame, 0, sizeof(d2_performance_frame));
+    memset(d2_performance_frame_valid, 0,
+           sizeof(d2_performance_frame_valid));
+    for (int player = 0; player < 3; ++player)
+        d2_last_screen_view[player] = -1;
+
+    char snapshot_title[80];
+    uint32_t snapshot_pads[8];
+    pthread_mutex_lock(&d2_state_mutex);
+    int snapshot_while_busy = d2_try_performance_snapshot(
+        1, snapshot_title, sizeof(snapshot_title), snapshot_pads);
+    pthread_mutex_unlock(&d2_state_mutex);
+    if (snapshot_while_busy != 0 ||
+        !d2_try_performance_snapshot(
+            1, snapshot_title, sizeof(snapshot_title), snapshot_pads)) {
+        failure = "performance-cache-nonblocking-snapshot";
+        goto cleanup;
+    }
+
+    d2_visible_deck_title(title_a, sizeof(title_a),
+                          "CACHE TRACK (ORIGINAL MIX)");
+    d2_visible_deck_title(title_b, sizeof(title_b),
+                          "CACHE TRACK [EXTENDED MIX]");
+    struct d2_performance_visible_state loop_visible;
+    struct d2_performance_visible_state repeated_visible;
+    struct d2_performance_visible_state upper_bits_visible;
+    struct d2_performance_visible_state changed_pad_visible;
+    struct d2_performance_visible_state hidden_suffix_visible;
+    struct d2_performance_visible_state changed_title_visible;
+    struct d2_performance_visible_state changed_view_visible;
+    d2_make_performance_visible_state(
+        &loop_visible, D2_VIEW_LOOP, title_a, pads);
+    d2_make_performance_visible_state(
+        &repeated_visible, D2_VIEW_LOOP, title_a, pads);
+
+    if (!d2_performance_visible_equal(
+            &loop_visible, &repeated_visible) ||
+        d2_performance_frame_is_current(1, &loop_visible)) {
+        failure = "performance-cache-first";
+        goto cleanup;
+    }
+    d2_commit_performance_frame(1, &loop_visible);
+    if (!d2_performance_frame_is_current(1, &loop_visible)) {
+        failure = "performance-cache-stable";
+        goto cleanup;
+    }
+
+    memcpy(upper_bits_only, pads, sizeof(pads));
+    upper_bits_only[0] |= 0xff000000U;
+    d2_make_performance_visible_state(
+        &upper_bits_visible, D2_VIEW_LOOP, title_a, upper_bits_only);
+    if (!d2_performance_visible_equal(
+            &upper_bits_visible, &loop_visible)) {
+        failure = "performance-cache-rgb-mask";
+        goto cleanup;
+    }
+
+    memcpy(changed_pads, pads, sizeof(pads));
+    changed_pads[0] ^= 0x00010101U;
+    d2_make_performance_visible_state(
+        &changed_pad_visible, D2_VIEW_LOOP, title_a, changed_pads);
+    if (d2_performance_visible_equal(
+            &changed_pad_visible, &loop_visible)) {
+        failure = "performance-cache-pad";
+        goto cleanup;
+    }
+    d2_make_performance_visible_state(
+        &hidden_suffix_visible, D2_VIEW_LOOP, title_b, pads);
+    if (strcmp(title_a, title_b) != 0 ||
+        !d2_performance_visible_equal(
+            &hidden_suffix_visible, &loop_visible)) {
+        failure = "performance-cache-hidden-title-suffix";
+        goto cleanup;
+    }
+    d2_make_performance_visible_state(
+        &changed_title_visible, D2_VIEW_LOOP, "OTHER TRACK", pads);
+    if (d2_performance_visible_equal(
+            &changed_title_visible, &loop_visible)) {
+        failure = "performance-cache-title";
+        goto cleanup;
+    }
+    d2_make_performance_visible_state(
+        &changed_view_visible, D2_VIEW_FREEZE, title_a, pads);
+    if (d2_performance_visible_equal(
+            &changed_view_visible, &loop_visible)) {
+        failure = "performance-cache-view";
+        goto cleanup;
+    }
+    if (d2_performance_frame_is_current(2, &loop_visible)) {
+        failure = "performance-cache-deck-isolation";
+        goto cleanup;
+    }
+
+    /* The same Performance content is no longer current after another full
+     * view was submitted; re-entry must send one complete frame. */
+    d2_last_screen_view[1] = D2_VIEW_DECK;
+    if (d2_performance_frame_is_current(1, &loop_visible)) {
+        failure = "performance-cache-reentry";
+        goto cleanup;
+    }
+
+    d2_browse_generation = 77;
+    d2_browse_rendered_generation[1] = 77;
+    d2_browse_frame_valid[1] = 1;
+    d2_last_screen_view[1] = D2_VIEW_DECK;
+    if (d2_browse_frame_is_current(1)) {
+        failure = "browse-cache-reentry";
+        goto cleanup;
+    }
+    d2_last_screen_view[1] = D2_VIEW_BROWSE;
+    if (!d2_browse_frame_is_current(1) ||
+        d2_browse_frame_is_current(2)) {
+        failure = "browse-cache-stable-isolation";
+        goto cleanup;
+    }
+
+cleanup:
+    memcpy(d2_performance_frame, saved_frame, sizeof(saved_frame));
+    memcpy(d2_performance_frame_valid, saved_frame_valid,
+           sizeof(saved_frame_valid));
+    memcpy(d2_last_screen_view, saved_last_view, sizeof(saved_last_view));
+    memcpy(d2_browse_rendered_generation,
+           saved_browse_rendered_generation,
+           sizeof(saved_browse_rendered_generation));
+    memcpy(d2_browse_frame_valid, saved_browse_frame_valid,
+           sizeof(saved_browse_frame_valid));
+    d2_browse_generation = saved_browse_generation;
+    if (failure) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED %s\n",
+                failure);
+        return 1;
+    }
+    return 0;
+}
+
+static int d2_performance_callback_contract_test(uint8_t *pixels)
+{
+    const char *failure = NULL;
+    struct ctlra_dev_t *fake_dev =
+        (struct ctlra_dev_t *)(uintptr_t)1;
+    int saved_map_count = d2_map_count;
+    struct ctlra_dev_t *saved_dev = d2_map[0].dev;
+    const char *saved_serial = d2_map[0].serial;
+    int saved_player = d2_map[0].player;
+    enum d2_screen_view saved_screen_view = d2_screen_view[1];
+    char saved_title[sizeof(d2_screen_state[1].title)];
+    uint32_t saved_pads[8];
+    struct d2_performance_visible_state saved_frame =
+        d2_performance_frame[1];
+    int saved_frame_valid = d2_performance_frame_valid[1];
+    int saved_last_view = d2_last_screen_view[1];
+    int saved_render_ready = d2_render_buffer_ready[1];
+    unsigned saved_render_index = d2_render_buffer_index[1];
+    uint64_t saved_render_generation = d2_render_generation[1];
+    uint64_t saved_usb_generation = d2_usb_generation[1];
+
+    if (!pixels)
+        return 1;
+    d2_copy_text(saved_title, sizeof(saved_title),
+                 d2_screen_state[1].title);
+    memcpy(saved_pads, d2_led_state[1].pad_rgb, sizeof(saved_pads));
+
+    d2_map_count = 1;
+    d2_map[0].dev = fake_dev;
+    d2_map[0].serial = "TEST";
+    d2_map[0].player = 1;
+    d2_screen_view[1] = D2_VIEW_LOOP;
+    d2_copy_text(d2_screen_state[1].title,
+                 sizeof(d2_screen_state[1].title), "CACHE CALLBACK");
+    memset(d2_led_state[1].pad_rgb, 0,
+           sizeof(d2_led_state[1].pad_rgb));
+    d2_led_state[1].pad_rgb[0] = 0x00ff60U;
+    d2_performance_frame_valid[1] = 0;
+    d2_last_screen_view[1] = -1;
+
+    int first = screen_callback(fake_dev, 0, pixels,
+                                WIDTH * HEIGHT * 2, NULL, NULL);
+    int stable = screen_callback(fake_dev, 0, pixels,
+                                 WIDTH * HEIGHT * 2, NULL, NULL);
+    if (first != 1 || stable != 0) {
+        failure = "performance-callback-first-stable";
+        goto cleanup;
+    }
+
+    d2_led_state[1].pad_rgb[0] = 0xff7800U;
+    int pad_changed = screen_callback(fake_dev, 0, pixels,
+                                      WIDTH * HEIGHT * 2, NULL, NULL);
+    int pad_stable = screen_callback(fake_dev, 0, pixels,
+                                     WIDTH * HEIGHT * 2, NULL, NULL);
+    if (pad_changed != 1 || pad_stable != 0) {
+        failure = "performance-callback-pad";
+        goto cleanup;
+    }
+
+    d2_screen_view[1] = D2_VIEW_DECK;
+    d2_render_buffer_ready[1] = 1;
+    d2_render_buffer_index[1] = 0;
+    d2_render_generation[1] = 101;
+    d2_usb_generation[1] = 100;
+    if (screen_callback(fake_dev, 0, pixels,
+                        WIDTH * HEIGHT * 2, NULL, NULL) != 1 ||
+        d2_last_screen_view[1] != D2_VIEW_DECK) {
+        failure = "performance-callback-deck-submit";
+        goto cleanup;
+    }
+
+    d2_screen_view[1] = D2_VIEW_LOOP;
+    int reentry = screen_callback(fake_dev, 0, pixels,
+                                  WIDTH * HEIGHT * 2, NULL, NULL);
+    int reentry_stable = screen_callback(fake_dev, 0, pixels,
+                                         WIDTH * HEIGHT * 2, NULL, NULL);
+    if (reentry != 1 || reentry_stable != 0) {
+        failure = "performance-callback-reentry";
+        goto cleanup;
+    }
+
+cleanup:
+    d2_map_count = saved_map_count;
+    d2_map[0].dev = saved_dev;
+    d2_map[0].serial = saved_serial;
+    d2_map[0].player = saved_player;
+    d2_screen_view[1] = saved_screen_view;
+    d2_copy_text(d2_screen_state[1].title,
+                 sizeof(d2_screen_state[1].title), saved_title);
+    memcpy(d2_led_state[1].pad_rgb, saved_pads, sizeof(saved_pads));
+    d2_performance_frame[1] = saved_frame;
+    d2_performance_frame_valid[1] = saved_frame_valid;
+    d2_last_screen_view[1] = saved_last_view;
+    d2_render_buffer_ready[1] = saved_render_ready;
+    d2_render_buffer_index[1] = saved_render_index;
+    d2_render_generation[1] = saved_render_generation;
+    d2_usb_generation[1] = saved_usb_generation;
+    if (failure) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED %s\n",
+                failure);
+        return 1;
+    }
+    return 0;
+}
+
+static int d2_functionality_contract_test(void)
+{
+    if (d2_font_thread_contract_test() != 0)
+        return 1;
+    if (d2_performance_cache_contract_test() != 0)
+        return 1;
+    if (d2_browse_delta_steps(0) != 0 ||
+        d2_browse_delta_steps(3) != 3 ||
+        d2_browse_delta_steps(-4) != -4 ||
+        d2_browse_delta_steps(999) != D2_BROWSE_MAX_STEPS_PER_REPORT ||
+        d2_browse_delta_steps(-999) != -D2_BROWSE_MAX_STEPS_PER_REPORT) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED browse-delta\n");
+        return 1;
+    }
+
+    uint8_t *pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
+    if (!pixels)
+        return 1;
+    if (d2_performance_callback_contract_test(pixels) != 0) {
+        free(pixels);
+        return 1;
+    }
+    if (d2_hud_parser_render_contract_test(pixels) != 0) {
+        free(pixels);
+        return 1;
+    }
+
+    struct d2_screen_state state = {
+        .rate = 1.0f,
+        .zoom_level = 2,
+        .loop_size = 4.0f,
+        .title = "DECK 1",
+        .artist = "MIXXX",
+        .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1},
+    };
+    d2_waveform_ready[1] = 0;
+    d2_wave_strip_ready[1] = 0;
+    d2_cover_art_ready[1] = 0;
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+
+    size_t live_probe = ((size_t)115 * WIDTH + 100) * 2;
+    if (pixels[live_probe] != 0 || pixels[live_probe + 1] != 0) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fake-waveform\n");
+        free(pixels);
+        return 1;
+    }
+    uint8_t overview_background[2];
+    rgb565(overview_background, 7, 14, 20);
+    size_t overview_probe = ((size_t)253 * WIDTH + 100) * 2;
+    if (memcmp(&pixels[overview_probe], overview_background, 2) != 0) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fake-overview\n");
+        free(pixels);
+        return 1;
+    }
+
+    state.fx_touch_mask = 1;
+    d2_fx_touch_updated_us[1] = d2_monotonic_us() - 1500001ULL;
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+    if (state.fx_touch_mask != 0 || d2_fx_touch_updated_us[1] != 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-timeout-latched\n");
+        free(pixels);
+        return 1;
+    }
+
+    state.fx_touch_mask = 0x0f;
+    d2_fx_touch_updated_us[1] = d2_monotonic_us() - 3000000ULL;
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+    if (state.fx_touch_mask != 0x0f || d2_fx_touch_updated_us[1] == 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-settings-timeout\n");
+        free(pixels);
+        return 1;
+    }
+
+    state.fx_touch_mask = 1;
+    d2_fx_touch_updated_us[1] = d2_monotonic_us();
+    d2_led_state[1].fx_unit = 1;
+    memset(pixels, 0, (size_t)WIDTH * HEIGHT * 2);
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+    size_t fx_unit_probe = ((size_t)116 * WIDTH + 192) * 2;
+    uint8_t fx_unit_one_pixel[2];
+    memcpy(fx_unit_one_pixel, &pixels[fx_unit_probe], 2);
+
+    d2_parse_test_message("D2|1|LEDFXSEL|2");
+    d2_fx_touch_updated_us[1] = d2_monotonic_us();
+    memset(pixels, 0, (size_t)WIDTH * HEIGHT * 2);
+    d2_render_deck_fast(pixels, 1, &state, 0.0f, state.title,
+                        220, 40, 40);
+    if (d2_led_state[1].fx_unit != 1 ||
+        strcmp(d2_fx_unit_label(1), "FX UNIT 1") != 0 ||
+        memcmp(fx_unit_one_pixel, &pixels[fx_unit_probe], 2) != 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-unit-ownership\n");
+        free(pixels);
+        return 1;
+    }
+    state.fx_touch_mask = 0;
+    d2_fx_touch_updated_us[1] = 0;
+
+    d2_led_state[1].pad_rgb[0] = 0x042010U;
+    d2_led_state[1].pad_rgb[1] = 0x00ff60U;
+    if (!d2_is_performance_view(D2_VIEW_HOTCUE) ||
+        !d2_is_performance_view(D2_VIEW_LOOP) ||
+        !d2_is_performance_view(D2_VIEW_SAMPLER) ||
+        !d2_is_performance_view(D2_VIEW_FREEZE) ||
+        !d2_is_performance_view(D2_VIEW_BEATJUMP) ||
+        d2_is_performance_view(D2_VIEW_DECK) ||
+        d2_is_performance_view(D2_VIEW_BROWSE)) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED performance-dispatch\n");
+        free(pixels);
+        return 1;
+    }
+    for (int view = D2_VIEW_DECK; view <= D2_VIEW_BEATJUMP; ++view) {
+        if (!d2_view_has_dedicated_compositor((enum d2_screen_view)view)) {
+            fprintf(stderr,
+                    "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED view-compositor-%d\n",
+                    view);
+            free(pixels);
+            return 1;
+        }
+    }
+    if (d2_view_has_dedicated_compositor((enum d2_screen_view)-1) ||
+        d2_view_has_dedicated_compositor((enum d2_screen_view)99)) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED invalid-view-compositor\n");
+        free(pixels);
+        return 1;
+    }
+    memset(pixels, 0, (size_t)WIDTH * HEIGHT * 2);
+    d2_render_dynamic_performance_view(
+        pixels, D2_VIEW_LOOP, state.title, d2_led_state[1].pad_rgb,
+        220, 40, 40);
+    uint8_t loop_idle_pixel[2];
+    uint8_t loop_active_pixel[2];
+    rgb565(loop_idle_pixel, 4, 32, 16);
+    rgb565(loop_active_pixel, 0, 255, 96);
+    size_t loop_idle_probe = ((size_t)84 * WIDTH + 30) * 2;
+    size_t loop_active_probe = ((size_t)84 * WIDTH + 140) * 2;
+    if (memcmp(&pixels[loop_idle_probe], loop_idle_pixel, 2) != 0 ||
+        memcmp(&pixels[loop_active_probe], loop_active_pixel, 2) != 0 ||
+        strcmp(d2_performance_heading(D2_VIEW_HOTCUE), "HOTCUE") != 0 ||
+        strcmp(d2_performance_heading(D2_VIEW_SAMPLER), "SAMPLER") != 0 ||
+        strcmp(d2_performance_instruction(D2_VIEW_HOTCUE),
+               "PRESS PAD: HOT CUE") != 0 ||
+        strcmp(d2_performance_instruction(D2_VIEW_SAMPLER),
+               "PRESS PAD: PLAY SAMPLE") != 0 ||
+        strcmp(d2_performance_pad_label(D2_VIEW_HOTCUE, 0), "1") != 0 ||
+        strcmp(d2_performance_pad_label(D2_VIEW_SAMPLER, 7), "8") != 0 ||
+        strcmp(d2_performance_pad_label(D2_VIEW_LOOP, 0), "1/4") != 0 ||
+        strcmp(d2_performance_pad_label(D2_VIEW_FREEZE, 7), "32") != 0 ||
+        strcmp(d2_performance_pad_label(D2_VIEW_BEATJUMP, 7), "+16") != 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED performance-feedback\n");
+        free(pixels);
+        return 1;
+    }
+    for (int pad = 0; pad < 8; ++pad) {
+        int cell_x = 24 + (pad % 4) * 110;
+        int cell_y = 80 + (pad / 4) * 64;
+        int min_x, min_y, max_x, max_y;
+        if (!d2_test_white_ink_bounds(pixels, cell_x + 2, cell_y + 2,
+                                      94, 48, &min_x, &min_y,
+                                      &max_x, &max_y) ||
+            max_y - min_y + 1 < 14 ||
+            abs((min_x + max_x) - (2 * cell_x + 97)) > 6 ||
+            abs((min_y + max_y) - (2 * cell_y + 51)) > 6) {
+            fprintf(stderr,
+                    "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED "
+                    "performance-label-geometry pad=%d bounds=%d,%d-%d,%d\n",
+                    pad + 1, min_x, min_y, max_x, max_y);
+            free(pixels);
+            return 1;
+        }
+    }
+
+    d2_parse_test_message("D2|1|FXSEL2|17");
+    if (d2_screen_state[1].fx_selection[1] != 17 ||
+        d2_screen_state[2].fx_selection[1] != 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-selection-parser\n");
+        free(pixels);
+        return 1;
+    }
+    d2_parse_test_message("D2|1|FXNAME2|U:Pitch%20Shift");
+    if (strcmp(d2_screen_state[1].fx_name[1], "Pitch Shift") != 0 ||
+        d2_screen_state[2].fx_name[1][0] != '\0') {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-name-parser\n");
+        free(pixels);
+        return 1;
+    }
+    char fx_label[96];
+    d2_fx_slot_label(fx_label, sizeof(fx_label), &d2_screen_state[1], 1, 102);
+    if (strstr(fx_label, "Pitch") == NULL ||
+        d2_measure_text_width(fx_label, 1) > 102) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-name-label\n");
+        free(pixels);
+        return 1;
+    }
+    d2_parse_test_message("D2|1|FXNAME2|U:%FF");
+    if (strcmp(d2_screen_state[1].fx_name[1], "Pitch Shift") != 0) {
+        fprintf(stderr,
+                "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-name-transaction\n");
+        free(pixels);
+        return 1;
+    }
+    free(pixels);
+
+    d2_parse_test_message("D2|1|PHASE|0,0,1,2,0");
+    if (d2_screen_state[1].phase_valid) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED phase-invalid\n");
+        return 1;
+    }
+    d2_parse_test_message("D2|1|PHASE|0,0,1,2,1,2,1");
+    d2_parse_test_message("D2|1|GRIDEDIT|1");
+    d2_parse_test_message("D2|1|CUECOLOR1|1193046");
+    if (!d2_screen_state[1].phase_valid ||
+        d2_screen_state[1].phase_master_step != 1 ||
+        d2_screen_state[1].phase_active_step != 2 ||
+        d2_screen_state[1].phase_master_deck != 2 ||
+        d2_screen_state[1].phase_follower_deck != 1 ||
+        !d2_screen_state[1].beatgrid_edit ||
+        d2_screen_state[1].hotcue_color[0] != 0x123456U) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED parser\n");
+        return 1;
+    }
+
+    d2_screen_state[1].fx_enabled[0] = 1;
+    d2_screen_state[1].fx_enabled[1] = 0;
+    d2_screen_state[1].fx_enabled[2] = 1;
+    d2_led_state[1].active_channel = 1;
+    d2_led_state[1].fx_assign_mask = 1;
+    if (!d2_fx_overlay_active(1, &d2_screen_state[1], 0, 0) ||
+        !d2_fx_overlay_active(1, &d2_screen_state[1], 1, 0) ||
+        d2_fx_overlay_active(1, &d2_screen_state[1], 2, 0) ||
+        !d2_fx_overlay_active(1, &d2_screen_state[1], 3, 0)) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED fx-alignment\n");
+        return 1;
+    }
+
+    d2_parse_test_message(
+        "D2|1|LEDPACK|0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0");
+    if (!d2_led_state[1].outputs_enabled) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED led-enable\n");
+        return 1;
+    }
+    d2_parse_test_message("D2|1|LEDOFF|1");
+    if (d2_led_state[1].outputs_enabled) {
+        fprintf(stderr, "D2_FUNCTIONALITY_CONTRACT_TEST_FAILED led-off\n");
+        return 1;
+    }
+
+    printf("D2_FUNCTIONALITY_CONTRACT_TEST_OK\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGINT, stop_handler);
@@ -3560,17 +5075,100 @@ int main(int argc, char **argv)
     if (!d2_ft_ready)
         fprintf(stderr, "D2 font: FreeType unavailable; using bitmap fallback\n");
     if (argc == 3 && strcmp(argv[1], "--render-test") == 0) {
-        int result = d2_render_test_image(argv[2]);
+        int result = d2_render_test_image(argv[2], 0);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-beatmap-test") == 0) {
+        int result = d2_render_test_image(argv[2], 1);
         d2_font_shutdown();
         return result;
     }
     if (argc == 3 && strcmp(argv[1], "--render-browse-test") == 0) {
-        int result = d2_render_browse_test_image(argv[2], 0);
+        int result = d2_render_browse_test_image(
+            argv[2], 0, D2_BROWSE_NOTICE_NONE);
         d2_font_shutdown();
         return result;
     }
     if (argc == 3 && strcmp(argv[1], "--render-browse-sidebar-test") == 0) {
-        int result = d2_render_browse_test_image(argv[2], 1);
+        int result = d2_render_browse_test_image(
+            argv[2], 1, D2_BROWSE_NOTICE_NONE);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-performance-test") == 0) {
+        int result = d2_render_performance_test_image(argv[2]);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-load-reject-test") == 0) {
+        int result = d2_render_browse_test_image(
+            argv[2], 0, D2_BROWSE_NOTICE_DECK_PLAYING);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-load-missing-test") == 0) {
+        int result = d2_render_browse_test_image(
+            argv[2], 0, D2_BROWSE_NOTICE_TRACK_MISSING);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--track-metadata-test") == 0) {
+        int track_id = atoi(argv[2]);
+        d2_begin_track_identity(1, track_id);
+        struct d2_track_assets *assets = calloc(1, sizeof(*assets));
+        if (!assets) {
+            d2_font_shutdown();
+            return 1;
+        }
+        d2_track_assets[1] = assets;
+        d2_bind_asset_slot(1, assets);
+        int result = d2_load_track_metadata(1, track_id, 0.0f);
+        printf("D2_TRACK_METADATA_TEST_%s track_id=%d location=%s "
+               "waveform=%d cover=%d beatgrid=%d beatmap=%d title=%s\n",
+               result ? "OK" : "FAILED", track_id,
+               d2_screen_state[1].location,
+               d2_waveform_ready[1], d2_cover_art_ready[1],
+               d2_screen_state[1].beatgrid_ready,
+               d2_screen_state[1].beatmap_ready,
+               d2_screen_state[1].title);
+        d2_begin_track_identity(1, 0);
+        d2_font_shutdown();
+        return result ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "--track-location-test") == 0) {
+        int track_id = d2_resolve_track_id_by_location(argv[2]);
+        d2_begin_track_identity(1, track_id);
+        struct d2_track_assets *assets = calloc(1, sizeof(*assets));
+        if (!assets) {
+            d2_font_shutdown();
+            return 1;
+        }
+        d2_track_assets[1] = assets;
+        d2_bind_asset_slot(1, assets);
+        int result = d2_load_track_metadata(1, track_id, 0.0f);
+        printf("D2_TRACK_LOCATION_TEST_%s track_id=%d location=%s "
+               "waveform=%d strip=%d title=%s\n",
+               result ? "OK" : "FAILED", track_id,
+               d2_screen_state[1].location,
+               d2_waveform_ready[1], d2_wave_strip_ready[1],
+               d2_screen_state[1].title);
+        d2_begin_track_identity(1, 0);
+        d2_font_shutdown();
+        return result ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--beat-geometry-test") == 0) {
+        int result = d2_beat_geometry_test();
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 2 && strcmp(argv[1], "--load-reject-notice-test") == 0) {
+        int result = d2_load_reject_notice_test();
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 2 && strcmp(argv[1], "--functionality-contract-test") == 0) {
+        int result = d2_functionality_contract_test();
         d2_font_shutdown();
         return result;
     }
@@ -3606,9 +5204,19 @@ int main(int argc, char **argv)
 
     printf("TOTAL D2 devices: %d\n", n);
 
+    if (d2_track_loaders_start() != 0) {
+        fprintf(stderr, "D2 track loader creation failed\n");
+        midi_shutdown();
+        ctlra_exit(ctlra);
+        d2_browse_db_shutdown();
+        d2_font_shutdown();
+        return 1;
+    }
+
     if (pthread_create(&d2_render_thread, NULL,
                        d2_render_thread_main, NULL) != 0) {
         fprintf(stderr, "D2 render thread creation failed\n");
+        d2_track_loaders_shutdown();
         midi_shutdown();
         ctlra_exit(ctlra);
         d2_browse_db_shutdown();
@@ -3640,6 +5248,8 @@ int main(int argc, char **argv)
         pthread_join(d2_render_thread, NULL);
         d2_render_thread_started = 0;
     }
+
+    d2_track_loaders_shutdown();
 
     midi_shutdown();
     ctlra_exit(ctlra);

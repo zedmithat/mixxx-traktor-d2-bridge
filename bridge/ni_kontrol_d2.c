@@ -291,9 +291,19 @@ struct ni_kontrol_d2_t {
 	/* Encoders */
 	uint8_t encoder_browse;
 	uint8_t encoder_loop;
+	uint8_t encoder_browse_initialized;
+	uint8_t encoder_loop_initialized;
 
 	/* current state of the lights, only flush on dirty */
 	uint8_t lights_dirty;
+	uint8_t lights_last_valid;
+	uint8_t lights_last[LEDS_SIZE + 1];
+
+	/* Display bulk writes and LED interrupt writes share libctlra's global
+	 * write counter. Keep endpoint-specific state so an LED report cannot make
+	 * the display look permanently busy. */
+	uint8_t screen_xfer_inflight;
+	uint8_t screen_xfer_pending;
 
 	float screen_encoders[4];
     /*
@@ -353,6 +363,12 @@ static uint32_t ni_kontrol_d2_poll(struct ctlra_dev_t *base)
 	ctlra_dev_impl_usb_interrupt_read(base, handle_idx,
 					  USB_ENDPOINT_BTNS_READ,
 					  buf, BUF_SIZE);
+
+	/* USB completions are dispatched before poll() by ctlra_idle_iter().
+	 * Arm physical input first, then submit at most one coalesced display
+	 * update after the previous complete frame has finished. */
+	if(dev->screen_xfer_pending && !dev->screen_xfer_inflight)
+		ni_kontrol_d2_screen_blit(base);
 	return 0;
 }
 
@@ -361,6 +377,18 @@ void ni_kontrol_d2_usb_read_cb(struct ctlra_dev_t *base, uint32_t endpoint,
 {
 	struct ni_kontrol_d2_t *dev = (struct ni_kontrol_d2_t *)base;
 	uint8_t *buf = data;
+
+	/* Successful asynchronous writes are reported through this callback too.
+	 * Clear only the screen endpoint; LED writes must not affect display flow. */
+	if(endpoint == USB_ENDPOINT_SCREEN_WRITE) {
+		dev->screen_xfer_inflight = 0;
+		/* A short successful write is still an incomplete D2 frame. Retry the
+		 * newest full framebuffer instead of leaving the display stalled. */
+		if(size != sizeof(dev->screen_blit))
+			dev->screen_xfer_pending = 1;
+		return;
+	}
+
 	switch(size) {
 	case 25: {
 		for(uint32_t i = 0; i < 4; i++) {
@@ -460,7 +488,10 @@ void ni_kontrol_d2_usb_read_cb(struct ctlra_dev_t *base, uint32_t endpoint,
 		int8_t browse = ((buf[1] & 0xf0) >> 4) & 0xf;
 		int8_t loop   = ((buf[1] & 0x0f)     ) & 0xf;
 		/* Browse encoder turn event */
-		if(browse != dev->encoder_browse) {
+		if(!dev->encoder_browse_initialized) {
+			dev->encoder_browse = browse;
+			dev->encoder_browse_initialized = 1;
+		} else if(browse != dev->encoder_browse) {
 			int dir = ctlra_dev_encoder_wrap_16(browse,
 							    dev->encoder_browse);
 			event.encoder.delta = dir;
@@ -469,7 +500,10 @@ void ni_kontrol_d2_usb_read_cb(struct ctlra_dev_t *base, uint32_t endpoint,
 					     dev->base.event_func_userdata);
 		}
 		/* Loop encoder turn event */
-		if(loop != dev->encoder_loop) {
+		if(!dev->encoder_loop_initialized) {
+			dev->encoder_loop = loop;
+			dev->encoder_loop_initialized = 1;
+		} else if(loop != dev->encoder_loop) {
 			int dir = ctlra_dev_encoder_wrap_16(loop,
 							    dev->encoder_loop);
 			event.encoder.id = NI_KONTROL_D2_ENCODER_LOOP;
@@ -533,19 +567,25 @@ ni_kontrol_d2_screen_blit(struct ctlra_dev_t *base)
 {
 	struct ni_kontrol_d2_t *dev = (struct ni_kontrol_d2_t *)base;
 
-	/* The D2 display is a live surface, not a video recorder.  The generic
-	 * asynchronous USB layer permits up to ten outstanding writes; at 60 Hz
-	 * those are ten complete 480x272 RGB565 frames and make the physical LCD
-	 * visibly replay stale waveform positions.  Keep only one transfer in
-	 * flight.  A redraw arriving while USB is busy is intentionally discarded;
-	 * the next redraw always contains the newest framebuffer. */
-	if (base->usb_xfer_counts[USB_XFER_INFLIGHT_WRITE] > 0)
+	/* The framebuffer is an overwrite buffer. While USB owns its copied full
+	 * frame, later redraws only set one pending bit. poll() sends the newest
+	 * complete header/pixels/footer image after completion. */
+	if(dev->screen_xfer_inflight) {
+		dev->screen_xfer_pending = 1;
 		return;
+	}
 
 	int ret = ctlra_dev_impl_usb_bulk_write(base, USB_INTERFACE_SCREEN,
 						USB_ENDPOINT_SCREEN_WRITE,
 						(uint8_t *)&dev->screen_blit,
 						sizeof(dev->screen_blit));
+	if(ret > 0) {
+		dev->screen_xfer_inflight = 1;
+		dev->screen_xfer_pending = 0;
+	} else {
+		/* A temporarily full libctlra queue is retried as one whole frame. */
+		dev->screen_xfer_pending = 1;
+	}
 	if(ret < 0)
 		printf("%s write failed!\n", __func__);
 }
@@ -559,6 +599,14 @@ ni_kontrol_d2_screen_get_data(struct ctlra_dev_t *base,
 			      uint8_t flush)
 {
 	struct ni_kontrol_d2_t *dev = (struct ni_kontrol_d2_t *)base;
+	(void)redraw;
+
+	/* A Kontrol D2 exposes one physical LCD. libctlra asks for up to two
+	 * screens per device, so reject the nonexistent second screen instead of
+	 * rendering and scheduling the same full frame twice. */
+	if(screen_idx != 0)
+		return -1;
+
 	/* fill in out params */
 	*pixels = ni_kontrol_d2_screen_get_pixels(base);
 	*bytes = sizeof(dev->screen_blit.pixels);
@@ -711,10 +759,24 @@ ni_kontrol_d2_light_flush(struct ctlra_dev_t *base, uint32_t force)
 	uint8_t *data = &dev->lights_endpoint;
 	dev->lights_endpoint = 0x80;
 
+	/* feedback_callback() recomputes all LEDs each control-loop iteration.
+	 * Suppress byte-identical reports so HID OUT traffic cannot starve the
+	 * interrupt IN endpoint that carries physical controls. */
+	if(!force && dev->lights_last_valid &&
+	   memcmp(dev->lights_last, data, LEDS_SIZE + 1) == 0) {
+		dev->lights_dirty = 0;
+		return;
+	}
+
 	int ret = ctlra_dev_impl_usb_interrupt_write(&dev->base,
 	                USB_INTERFACE_BTNS,
 	                USB_ENDPOINT_BTNS_WRITE,
 	                data, LEDS_SIZE+1);
+	if(ret > 0) {
+		memcpy(dev->lights_last, data, LEDS_SIZE + 1);
+		dev->lights_last_valid = 1;
+		dev->lights_dirty = 0;
+	}
 	if(ret < 0)
 		printf("%s write failed!\n", __func__);
 }

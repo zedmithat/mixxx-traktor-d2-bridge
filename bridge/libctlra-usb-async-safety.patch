@@ -1,0 +1,134 @@
+diff --git a/ctlra/usb.c b/ctlra/usb.c
+--- a/ctlra/usb.c
++++ b/ctlra/usb.c
+@@ -38,8 +38,22 @@ struct usb_async_t {
+ 	struct usb_async_t *next;
+ 	struct usb_async_t *prev;
+ 	struct libusb_transfer *xfer;
+ 	char malloc_mem[0];
+ };
++
++static inline void
++ctlra_usb_impl_async_unlink(struct ctlra_dev_t *dev,
++                            struct usb_async_t *async)
++{
++	struct usb_async_t *next = async->next;
++	struct usb_async_t *prev = async->prev;
++	if(next)
++		next->prev = prev;
++	if(prev)
++		prev->next = next;
++	else
++		dev->usb_async_next = next;
++}
+ 
+ #include <assert.h>
+ 
+@@ -561,17 +575,9 @@ ctlra_usb_xfr_done_generic(struct libusb_transfer *xfr, int read)
+ 
+ 	XFER_VALIDATE(dev);
+ 
+-	/* remove node from double linked list*/
+-	struct usb_async_t *next = async->next;
+-	struct usb_async_t *prev = async->prev;
+-	CTLRA_DRIVER(ctlra, "async = %p, next %p, prev %p\n", async, next, prev);
+-	if(next)
+-		next->prev = prev;
+-	if(prev) {
+-		prev->next = next;
+-	} else {
+-		dev->usb_async_next = next;
+-	}
++	CTLRA_DRIVER(ctlra, "async = %p, next %p, prev %p\n",
++		     async, async->next, async->prev);
++	ctlra_usb_impl_async_unlink(dev, async);
+ 
+ 	XFER_VALIDATE(dev);
+ 
+@@ -621,6 +627,8 @@ int ctlra_dev_impl_usb_interrupt_read(struct ctlra_dev_t *dev, uint32_t idx,
+ 	xfr = libusb_alloc_transfer(0);
+ 	if(xfr == 0) {
+ 		CTLRA_DRIVER(ctlra, "xfr == %p\n", xfr);
++		dev->usb_xfer_counts[USB_XFER_ERROR]++;
++		return -ENOSPC;
+ 	}
+ 
+ 	/* Malloc space for the USB transaction - not ideal, but we have
+@@ -632,8 +640,13 @@ int ctlra_dev_impl_usb_interrupt_read(struct ctlra_dev_t *dev, uint32_t idx,
+ 	 * clean shutdown. Hence, we allocate a usb_async_t struct, which
+ 	 * is used as a linked list for xfers, at little extra overhead
+ 	 * due to just allocating a slightly block, and keeping the list
+ 	 * pointer at the start of the block, before the libusb xfer mem */
+ 	struct usb_async_t *async = malloc(size + sizeof(struct usb_async_t));
++	if(!async) {
++		libusb_free_transfer(xfr);
++		dev->usb_xfer_counts[USB_XFER_ERROR]++;
++		return -ENOSPC;
++	}
+ 
+ 	XFER_VALIDATE(dev);
+ 
+@@ -669,8 +682,9 @@ int ctlra_dev_impl_usb_interrupt_read(struct ctlra_dev_t *dev, uint32_t idx,
+ 	 * writes to LEDs are serviced correctly. There is no negative
+ 	 * impact of these IO errors - so just free buffers and next iter
+ 	 * of reads will catch any data if available */
+ 	if(res) {
++		ctlra_usb_impl_async_unlink(dev, async);
+ 		libusb_free_transfer(xfr);
+-		free(usb_data);
++		free(async);
+ 		if(res == LIBUSB_ERROR_IO)
+ 			return 0;
+@@ -742,11 +756,15 @@ int ctlra_dev_impl_usb_interrupt_write(struct ctlra_dev_t *dev, uint32_t idx,
+ 	struct libusb_transfer *xfr;
+ 	xfr = libusb_alloc_transfer(0);
+-	if(xfr == 0)
++	if(xfr == 0) {
+ 		CTLRA_ERROR(ctlra, "write xfr == %p!\n", xfr);
++		dev->usb_xfer_counts[USB_XFER_ERROR]++;
++		return -ENOSPC;
++	}
+ 
+ 	/* see comment in interrupt read for malloc() and async details */
+ 	struct usb_async_t *async = malloc(size + sizeof(struct usb_async_t));
+ 	if(!async) {
++		libusb_free_transfer(xfr);
+ 		dev->usb_xfer_counts[USB_XFER_ERROR]++;
+ 		return -ENOSPC;
+ 	}
+@@ -775,7 +793,9 @@ int ctlra_dev_impl_usb_interrupt_write(struct ctlra_dev_t *dev, uint32_t idx,
+ 					       banish it if required */
+ 				       timeout);
+ 	if(libusb_submit_transfer(xfr) < 0) {
++		ctlra_usb_impl_async_unlink(dev, async);
+ 		libusb_free_transfer(xfr);
+-		free(usb_data);
++		free(async);
++		dev->usb_xfer_counts[USB_XFER_ERROR]++;
+ 		//printf("error submitting data!!\n");
+ 		return -1;
+@@ -823,11 +843,15 @@ int ctlra_dev_impl_usb_bulk_write(struct ctlra_dev_t *dev, uint32_t idx,
+ 	struct libusb_transfer *xfr;
+ 	xfr = libusb_alloc_transfer(0);
+-	if(xfr == 0)
++	if(xfr == 0) {
+ 		CTLRA_ERROR(ctlra, "write xfr == %p!\n", xfr);
++		dev->usb_xfer_counts[USB_XFER_BULK_ERROR]++;
++		return -ENOSPC;
++	}
+ 
+ 	/* see comment in interrupt read for malloc() and async details */
+ 	struct usb_async_t *async = malloc(size + sizeof(struct usb_async_t));
+ 	if(!async) {
++		libusb_free_transfer(xfr);
+ 		dev->usb_xfer_counts[USB_XFER_BULK_ERROR]++;
+ 		return -ENOSPC;
+ 	}
+@@ -855,6 +879,7 @@ int ctlra_dev_impl_usb_bulk_write(struct ctlra_dev_t *dev, uint32_t idx,
+ 					       banish it if required */
+ 				       timeout);
+ 	if(libusb_submit_transfer(xfr) < 0) {
++		ctlra_usb_impl_async_unlink(dev, async);
+ 		libusb_free_transfer(xfr);
+ 		free(async);
+ 		dev->usb_xfer_counts[USB_XFER_BULK_ERROR]++;

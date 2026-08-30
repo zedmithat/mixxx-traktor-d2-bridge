@@ -23,6 +23,10 @@ class LoadToGroupController : public QObject {
     LoadToGroupController(LibraryControl* pParent, const QString& group);
     virtual ~LoadToGroupController();
 
+    void notifyLoadRejectedPlaying();
+    void notifyLoadMissing();
+    void notifyLoadNoSelection();
+
   signals:
     void loadToGroup(const QString& group, bool);
 
@@ -34,6 +38,12 @@ class LoadToGroupController : public QObject {
     const QString m_group;
     std::unique_ptr<ControlObject> m_pLoadControl;
     std::unique_ptr<ControlObject> m_pLoadAndPlayControl;
+    std::unique_ptr<ControlObject> m_pLoadRejectedPlaying;
+    std::unique_ptr<ControlObject> m_pLoadMissing;
+    std::unique_ptr<ControlObject> m_pLoadNoSelection;
+    double m_loadRejectedPlayingSequence{0.0};
+    double m_loadMissingSequence{0.0};
+    double m_loadNoSelectionSequence{0.0};
 };
 
 class LibraryControl : public QObject {

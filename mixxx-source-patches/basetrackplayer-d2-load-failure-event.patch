@@ -1,0 +1,43 @@
+diff --git a/src/mixer/basetrackplayer.cpp b/src/mixer/basetrackplayer.cpp
+--- a/src/mixer/basetrackplayer.cpp
++++ b/src/mixer/basetrackplayer.cpp
+@@ -96,6 +96,13 @@ BaseTrackPlayerImpl::BaseTrackPlayerImpl(
+     m_pDuration = std::make_unique<ControlObject>(
+         ConfigKey(getGroup(), "duration"));
+ 
++    // Monotonic event sequence for controller/display integrations. A
++    // sequence counter cannot be missed like a short boolean pulse can.
++    m_pD2TrackLoadFailedSequence = std::make_unique<ControlObject>(
++            ConfigKey(getGroup(), "d2_track_load_failed_sequence"), false);
++    m_pD2TrackLoadFailedSequence->setReadOnly();
++    m_pD2TrackLoadFailedSequence->setAndConfirm(0.0);
++
+     // Track color of the current track
+     m_pTrackColor = std::make_unique<ControlObject>(
+             ConfigKey(getGroup(), "track_color"));
+@@ -545,5 +552,10 @@ void BaseTrackPlayerImpl::slotLoadFailed(TrackPointer pTrack, const QString& reas
+     // We must unload the track m_pLoadedTrack as well
+-    if (pTrack == m_pLoadedTrack) {
++    if (pTrack && pTrack == m_pLoadedTrack) {
++        m_d2TrackLoadFailedSequence += 1.0;
++        if (m_d2TrackLoadFailedSequence > 1000000000.0) {
++            m_d2TrackLoadFailedSequence = 1.0;
++        }
++        m_pD2TrackLoadFailedSequence->setAndConfirm(m_d2TrackLoadFailedSequence);
+         qDebug() << "Failed to load track" << pTrack->getFileInfo() << reason;
+         slotTrackLoaded(TrackPointer(), pTrack);
+     } else if (pTrack) {
+diff --git a/src/mixer/basetrackplayer.h b/src/mixer/basetrackplayer.h
+--- a/src/mixer/basetrackplayer.h
++++ b/src/mixer/basetrackplayer.h
+@@ -148,6 +148,10 @@ class BaseTrackPlayerImpl : public BaseTrackPlayer {
+     parented_ptr<ControlProxy> m_pLoopOutPoint;
+     std::unique_ptr<ControlObject> m_pDuration;
+ 
++    // Read-only monotonic sequence for authoritative asynchronous load failures.
++    std::unique_ptr<ControlObject> m_pD2TrackLoadFailedSequence;
++    double m_d2TrackLoadFailedSequence{0.0};
++
+     // TODO() these COs are reconnected during runtime
+     // This may lock the engine
+     std::unique_ptr<ControlObject> m_pFileBPM;

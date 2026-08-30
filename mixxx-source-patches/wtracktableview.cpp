@@ -1381,10 +1381,27 @@ void WTrackTableView::activateSelectedTrack() {
     slotMouseDoubleClicked(indices.at(0));
 }
 
-void WTrackTableView::loadSelectedTrackToGroup(const QString& group, bool play) {
-    const QModelIndexList indices = getSelectedRows();
+WTrackTableView::LoadSelectedTrackResult WTrackTableView::loadSelectedTrackToGroup(
+        const QString& group, bool play) {
+    QModelIndexList indices = getSelectedRows();
+    // Controller navigation can leave a valid current index without adding
+    // it to selectedRows() (notably compact/touch skins and freshly populated
+    // USB proxy models). The D2 browse window intentionally follows this same
+    // current index, so use it as the load target when no row selection exists.
     if (indices.isEmpty()) {
-        return;
+        const QItemSelectionModel* pSelectionModel = selectionModel();
+        if (pSelectionModel && pSelectionModel->currentIndex().isValid()) {
+            indices.append(pSelectionModel->currentIndex());
+        }
+    }
+    if (indices.isEmpty()) {
+        return LoadSelectedTrackResult::NoSelection;
+    }
+    const auto index = indices.at(0);
+    auto* pTrackModel = getTrackModel();
+    TrackPointer pTrack;
+    if (!pTrackModel || !(pTrack = pTrackModel->getTrack(index))) {
+        return LoadSelectedTrackResult::NoSelection;
     }
     bool allowLoadTrackIntoPlayingDeck = false;
     if (m_pConfig->exists(kConfigKeyLoadWhenDeckPlaying)) {
@@ -1409,14 +1426,13 @@ void WTrackTableView::loadSelectedTrackToGroup(const QString& group, bool play) 
     if (!allowLoadTrackIntoPlayingDeck &&
             !PlayerManager::isPreviewDeckGroup(group) &&
             ControlObject::get(ConfigKey(group, "play")) > 0.0) {
-        return;
+        return LoadSelectedTrackResult::RejectedPlaying;
     }
-    auto index = indices.at(0);
-    auto* pTrackModel = getTrackModel();
-    TrackPointer pTrack;
-    if (pTrackModel && (pTrack = pTrackModel->getTrack(index))) {
-        emit loadTrackToPlayer(pTrack, group, play);
+    if (!pTrack->getFileInfo().checkFileExists()) {
+        return LoadSelectedTrackResult::MissingFile;
     }
+    emit loadTrackToPlayer(pTrack, group, play);
+    return LoadSelectedTrackResult::Loaded;
 }
 
 QList<TrackId> WTrackTableView::getSelectedTrackIds() const {

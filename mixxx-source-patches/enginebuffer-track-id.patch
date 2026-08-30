@@ -1,0 +1,51 @@
+diff --git a/src/engine/enginebuffer.cpp b/src/engine/enginebuffer.cpp
+--- a/src/engine/enginebuffer.cpp
++++ b/src/engine/enginebuffer.cpp
+@@ -170,6 +170,10 @@ EngineBuffer::EngineBuffer(const QString& group,
+ 
+     m_pTrackSamples = new ControlObject(ConfigKey(m_group, "track_samples"));
+     m_pTrackSampleRate = new ControlObject(ConfigKey(m_group, "track_samplerate"));
++    // Authoritative library identity for controller/display integrations.
++    // This is assigned before track_loaded is raised in slotTrackLoaded().
++    m_pTrackId = new ControlObject(ConfigKey(m_group, "track_id"), false);
++    m_pTrackId->setReadOnly();
+ 
+     m_pKeylock = new ControlPushButton(ConfigKey(m_group, "keylock"), true);
+     m_pKeylock->setButtonMode(ControlPushButton::TOGGLE);
+@@ -314,6 +318,7 @@ EngineBuffer::~EngineBuffer() {
+     delete m_pTrackLoaded;
+     delete m_pTrackSamples;
+     delete m_pTrackSampleRate;
++    delete m_pTrackId;
+ 
+     delete m_pScaleLinear;
+     delete m_pScaleST;
+@@ -546,6 +551,9 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
+     m_pCurrentTrack = pTrack;
+     m_pTrackSamples->set(trackNumSamples);
+     m_pTrackSampleRate->set(trackSampleRate.toDouble());
++    const auto trackId = pTrack->getId();
++    m_pTrackId->forceSet(
++            trackId.isValid() ? trackId.toVariant().toDouble() : 0.0);
+     m_pTrackLoaded->forceSet(1);
+ 
+     // Reset slip mode
+@@ -616,6 +624,7 @@ void EngineBuffer::ejectTrack() {
+     m_pCurrentTrack.reset();
+     setTrackEndPosition(mixxx::audio::kInvalidFramePos);
+     m_pTrackSampleRate->set(0);
++    m_pTrackId->forceSet(0);
+     m_pTrackLoaded->forceSet(0);
+ 
+     m_playButton->set(0.0);
+diff --git a/src/engine/enginebuffer.h b/src/engine/enginebuffer.h
+--- a/src/engine/enginebuffer.h
++++ b/src/engine/enginebuffer.h
+@@ -389,6 +389,7 @@ class EngineBuffer : public EngineObject {
+ 
+     ControlObject* m_pTrackSamples;
+     ControlObject* m_pTrackSampleRate;
++    ControlObject* m_pTrackId;
+ 
+     ControlPushButton* m_playButton;
+     ControlPushButton* m_playStartButton;

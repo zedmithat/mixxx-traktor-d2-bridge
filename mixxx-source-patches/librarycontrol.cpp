@@ -42,6 +42,20 @@ LoadToGroupController::LoadToGroupController(LibraryControl* pParent, const QStr
             this,
             &LoadToGroupController::slotLoadToGroupAndPlay);
 
+    /* Monotonic event sequence: unlike a short boolean pulse, this cannot be
+     * missed when controller callbacks are delivered after the UI event. */
+    m_pLoadRejectedPlaying = std::make_unique<ControlObject>(
+            ConfigKey(group, "d2_load_rejected_playing_sequence"), false);
+    m_pLoadRejectedPlaying->setAndConfirm(0.0);
+    m_pLoadMissing = std::make_unique<ControlObject>(
+            ConfigKey(group, "d2_load_missing_sequence"), false);
+    m_pLoadMissing->setReadOnly();
+    m_pLoadMissing->setAndConfirm(0.0);
+    m_pLoadNoSelection = std::make_unique<ControlObject>(
+            ConfigKey(group, "d2_load_no_selection_sequence"), false);
+    m_pLoadNoSelection->setReadOnly();
+    m_pLoadNoSelection->setAndConfirm(0.0);
+
     connect(this,
             &LoadToGroupController::loadToGroup,
             pParent,
@@ -49,6 +63,30 @@ LoadToGroupController::LoadToGroupController(LibraryControl* pParent, const QStr
 }
 
 LoadToGroupController::~LoadToGroupController() = default;
+
+void LoadToGroupController::notifyLoadRejectedPlaying() {
+    m_loadRejectedPlayingSequence += 1.0;
+    if (m_loadRejectedPlayingSequence > 1000000000.0) {
+        m_loadRejectedPlayingSequence = 1.0;
+    }
+    m_pLoadRejectedPlaying->setAndConfirm(m_loadRejectedPlayingSequence);
+}
+
+void LoadToGroupController::notifyLoadMissing() {
+    m_loadMissingSequence += 1.0;
+    if (m_loadMissingSequence > 1000000000.0) {
+        m_loadMissingSequence = 1.0;
+    }
+    m_pLoadMissing->setAndConfirm(m_loadMissingSequence);
+}
+
+void LoadToGroupController::notifyLoadNoSelection() {
+    m_loadNoSelectionSequence += 1.0;
+    if (m_loadNoSelectionSequence > 1000000000.0) {
+        m_loadNoSelectionSequence = 1.0;
+    }
+    m_pLoadNoSelection->setAndConfirm(m_loadNoSelectionSequence);
+}
 
 void LoadToGroupController::slotLoadToGroup(double v) {
     if (v > 0) {
@@ -706,7 +744,23 @@ void LibraryControl::slotLoadSelectedTrackToGroup(const QString& group, bool pla
 
     WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
     if (pTrackTableView) {
-        pTrackTableView->loadSelectedTrackToGroup(group, play);
+        const auto result = pTrackTableView->loadSelectedTrackToGroup(group, play);
+        const auto controller = m_loadToGroupControllers.find(group);
+        if (controller != m_loadToGroupControllers.end()) {
+            switch (result) {
+            case WTrackTableView::LoadSelectedTrackResult::RejectedPlaying:
+                controller->second->notifyLoadRejectedPlaying();
+                break;
+            case WTrackTableView::LoadSelectedTrackResult::MissingFile:
+                controller->second->notifyLoadMissing();
+                break;
+            case WTrackTableView::LoadSelectedTrackResult::NoSelection:
+                controller->second->notifyLoadNoSelection();
+                break;
+            case WTrackTableView::LoadSelectedTrackResult::Loaded:
+                break;
+            }
+        }
     }
 }
 

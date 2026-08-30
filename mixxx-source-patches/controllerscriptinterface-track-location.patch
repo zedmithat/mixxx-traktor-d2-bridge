@@ -1,0 +1,40 @@
+diff --git a/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.cpp b/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.cpp
+--- a/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.cpp
++++ b/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.cpp
+@@ -4,8 +4,10 @@
+ #include "control/controlobjectscript.h"
+ #include "controllers/scripting/legacy/controllerscriptenginelegacy.h"
+ #include "controllers/scripting/legacy/scriptconnectionjsproxy.h"
++#include "mixer/playerinfo.h"
+ #include "mixer/playermanager.h"
+ #include "moc_controllerscriptinterfacelegacy.cpp"
++#include "track/track.h"
+ #include "util/fpclassify.h"
+ #include "util/make_const_iterator.h"
+ #include "util/time.h"
+@@ -142,6 +144,14 @@ double ControllerScriptInterfaceLegacy::getValue(const QString& group, const QS
+     return coScript->get();
+ }
+ 
++QString ControllerScriptInterfaceLegacy::getTrackLocation(const QString& group) {
++    const TrackPointer pTrack = PlayerInfo::instance().getTrackInfo(group);
++    if (!pTrack) {
++        return QString();
++    }
++    return pTrack->getLocation();
++}
++
+ void ControllerScriptInterfaceLegacy::setValue(
+         const QString& group, const QString& name, double newValue) {
+     if (util_isnan(newValue)) {
+diff --git a/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.h b/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.h
+--- a/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.h
++++ b/src/controllers/scripting/legacy/controllerscriptinterfacelegacy.h
+@@ -24,6 +24,7 @@ class ControllerScriptInterfaceLegacy : public QObject {
+ 
+     Q_INVOKABLE QJSValue getSetting(const QString& name);
+     Q_INVOKABLE double getValue(const QString& group, const QString& name);
++    Q_INVOKABLE QString getTrackLocation(const QString& group);
+     Q_INVOKABLE void setValue(const QString& group, const QString& name, double newValue);
+     Q_INVOKABLE double getParameter(const QString& group, const QString& name);
+     Q_INVOKABLE void setParameter(const QString& group, const QString& name, double newValue);

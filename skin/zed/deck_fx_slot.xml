@@ -1,0 +1,64 @@
+<Template>
+  <WidgetGroup>
+    <ObjectName>DeckFxSlot</ObjectName>
+    <Layout>vertical</Layout>
+    <Size>0me,58f</Size>
+    <Children>
+      <EffectSelector>
+        <ObjectName>DeckFxSelector</ObjectName>
+        <Size>0me,27f</Size>
+        <EffectRack>1</EffectRack>
+        <EffectUnit><Variable name="unit"/></EffectUnit>
+        <Effect><Variable name="effect"/></Effect>
+        <Elide>right</Elide>
+      </EffectSelector>
+
+      <WidgetGroup>
+        <ObjectName>DeckFxSlotControls</ObjectName>
+        <Layout>horizontal</Layout>
+        <Size>0me,31f</Size>
+        <Children>
+          <PushButton>
+            <ObjectName>DeckFxToggle</ObjectName>
+            <TooltipId>EffectSlot_enabled</TooltipId>
+            <Size>55f,29f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>FX <Variable name="effect"/> OFF</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>FX <Variable name="effect"/> ON</Text>
+            </State>
+            <Connection>
+              <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>],enabled</ConfigKey>
+            </Connection>
+          </PushButton>
+
+          <Label>
+            <ObjectName>DeckFxMetaLabel</ObjectName>
+            <Size>0me,29f</Size>
+            <Text>AMOUNT</Text>
+          </Label>
+
+          <EffectMetaKnob>
+            <ObjectName>DeckFxMetaKnob</ObjectName>
+            <TooltipId>EffectSlot_metaknob</TooltipId>
+            <Size>31f,29f</Size>
+            <Knob>skin:/icons/fx_knob_indicator.svg</Knob>
+            <BackPath>skin:/icons/fx_knob_bg.svg</BackPath>
+            <MinAngle>-135</MinAngle>
+            <MaxAngle>135</MaxAngle>
+            <KnobCenterYOffset>1.4</KnobCenterYOffset>
+            <EffectUnit><Variable name="unit"/></EffectUnit>
+            <Effect><Variable name="effect"/></Effect>
+            <Connection>
+              <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>],meta</ConfigKey>
+            </Connection>
+          </EffectMetaKnob>
+        </Children>
+      </WidgetGroup>
+    </Children>
+  </WidgetGroup>
+</Template>

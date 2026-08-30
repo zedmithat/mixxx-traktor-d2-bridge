@@ -14,15 +14,12 @@
       <control><group>[Channel2]</group><key>D2.browseEncoder</key><description>P2 Browse</description><status>0xB1</status><midino>0x14</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>LoadSelectedTrack</key><description>P1 Native Load</description><status>0x90</status><midino>0x3E</midino><options><normal/></options></control>
       <control><group>[Channel2]</group><key>LoadSelectedTrack</key><description>P2 Native Load</description><status>0x91</status><midino>0x3E</midino><options><normal/></options></control>
+      <control><group>[Channel1]</group><key>D2.sidebarActivate</key><description>P1 Open Library Folder</description><status>0x90</status><midino>0x3D</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.sidebarActivate</key><description>P2 Open Library Folder</description><status>0x91</status><midino>0x3D</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.backButton</key><description>P1 Library Focus</description><status>0x90</status><midino>0x3F</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.backButton</key><description>P2 Library Focus</description><status>0x91</status><midino>0x3F</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.browseTouch</key><description>P1 Main Browse</description><status>0x90</status><midino>0x64</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.browseTouch</key><description>P2 Main Browse</description><status>0x91</status><midino>0x64</midino><options><script-binding/></options></control>
-      <control><group>[Tab]</group><key>library</key><description>P1 Library Tab</description><status>0x90</status><midino>0x64</midino><options><normal/></options></control>
-      <control><group>[Tab]</group><key>library</key><description>P2 Library Tab</description><status>0x91</status><midino>0x64</midino><options><normal/></options></control>
-      <control><group>[Tab]</group><key>overview</key><description>P1 Overview Tab</description><status>0x90</status><midino>0x65</midino><options><normal/></options></control>
-      <control><group>[Tab]</group><key>overview</key><description>P2 Overview Tab</description><status>0x91</status><midino>0x65</midino><options><normal/></options></control>
-
       <control><group>[Channel1]</group><key>D2.playButton</key><description>P1 Play/Pause CC</description><status>0xB0</status><midino>0x71</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.playButton</key><description>P2 Play/Pause CC</description><status>0xB1</status><midino>0x71</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.cueButton</key><description>P1 Cue CC</description><status>0xB0</status><midino>0x70</midino><options><script-binding/></options></control>
@@ -73,14 +70,14 @@
       <control><group>[Channel2]</group><key>D2.rightScreenButton</key><description>P2 Screen Right 3</description><status>0x91</status><midino>0x37</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.rightScreenButton</key><description>P2 Screen Right 4</description><status>0x91</status><midino>0x38</midino><options><script-binding/></options></control>
 
-      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 1</description><status>0x90</status><midino>0x28</midino><options><script-binding/></options></control>
-      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 2</description><status>0x90</status><midino>0x29</midino><options><script-binding/></options></control>
-      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 3</description><status>0x90</status><midino>0x2A</midino><options><script-binding/></options></control>
-      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX All</description><status>0x90</status><midino>0x2B</midino><options><script-binding/></options></control>
-      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 1</description><status>0x91</status><midino>0x28</midino><options><script-binding/></options></control>
-      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 2</description><status>0x91</status><midino>0x29</midino><options><script-binding/></options></control>
-      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 3</description><status>0x91</status><midino>0x2A</midino><options><script-binding/></options></control>
-      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX All</description><status>0x91</status><midino>0x2B</midino><options><script-binding/></options></control>
+      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX Unit On</description><status>0x90</status><midino>0x28</midino><options><script-binding/></options></control>
+      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 1</description><status>0x90</status><midino>0x29</midino><options><script-binding/></options></control>
+      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 2</description><status>0x90</status><midino>0x2A</midino><options><script-binding/></options></control>
+      <control><group>[Channel1]</group><key>D2.fxButton</key><description>P1 FX 3</description><status>0x90</status><midino>0x2B</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX Unit On</description><status>0x91</status><midino>0x28</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 1</description><status>0x91</status><midino>0x29</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 2</description><status>0x91</status><midino>0x2A</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.fxButton</key><description>P2 FX 3</description><status>0x91</status><midino>0x2B</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.fxTouch</key><description>P1 FX Touch 1</description><status>0x90</status><midino>0x2C</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.fxTouch</key><description>P1 FX Touch 2</description><status>0x90</status><midino>0x2D</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.fxTouch</key><description>P1 FX Touch 3</description><status>0x90</status><midino>0x2E</midino><options><script-binding/></options></control>

@@ -22,6 +22,13 @@ class WTrackMenu;
 class WTrackTableView : public WLibraryTableView {
     Q_OBJECT
   public:
+    enum class LoadSelectedTrackResult {
+        NoSelection,
+        Loaded,
+        RejectedPlaying,
+        MissingFile,
+    };
+
     WTrackTableView(
             QWidget* pParent,
             UserSettingsPointer pConfig,
@@ -41,7 +48,8 @@ class WTrackTableView : public WLibraryTableView {
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void activateSelectedTrack();
-    void loadSelectedTrackToGroup(const QString& group, bool play);
+    LoadSelectedTrackResult loadSelectedTrackToGroup(
+            const QString& group, bool play);
     void assignNextTrackColor() override;
     void assignPreviousTrackColor() override;
     TrackModel::SortColumnId getColumnIdFromCurrentIndex() override;
