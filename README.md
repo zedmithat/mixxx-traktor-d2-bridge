@@ -47,6 +47,8 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 - Dark Nexus-style browser with title, artist, BPM and key columns
 - Browse-context sorting from the four left screen buttons: Title, BPM, Key,
   and ascending/descending order, with the active sort shown in the header
+- Zed-only animated Orbitron launch mark with sequential, non-looping `z-e-d`
+  vector reveals and no startup delay after the skin is ready
 - Per-deck Zed FX bars backed by the same Effect Unit state as both D2s
 - Live EffectManifest names on the D2 FX overlay (no numeric effect indexes)
 - Mixxx controller JavaScript, MIDI XML and regression tests

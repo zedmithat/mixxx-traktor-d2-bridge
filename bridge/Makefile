@@ -66,6 +66,7 @@ test-js:
 	$(NODE) ../tests/test_d2_fx_roundtrip.js
 	$(PYTHON) ../tests/test_zed_fx_layout.py
 	$(PYTHON) ../tests/test_time_display_modes.py
+	$(PYTHON) ../tests/test_zed_launch_animation.py
 
 clean:
 	rm -f $(OUTPUT_DIR)/d2_bridge_metadata \

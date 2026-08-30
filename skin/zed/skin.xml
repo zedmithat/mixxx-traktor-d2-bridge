@@ -27,31 +27,44 @@
 
 	<LaunchImageStyle>
 	  LaunchImage {
-		background-color:#000;
+		background-color:#020406;
 		}
 	  QLabel {
-	    image: url(skin:/images/xdj100sx_logo.png);
-		border:none;
-		min-width:450px;
-		max-width:450px;
-		min-height:150px;
-		max-height:150px;
-		margin:0px 25px -30px 75px;
-
-	  }
-		QProgressBar {
-	    background-color: #262626;
+	    image: none;
 		border:none;
 		padding:0;
-		min-width:600px;
-		max-width:600px;
-		max-height: 4px;
-		max-height: 4px;
+		margin:0;
+		background:transparent;
+	  }
+	  QLabel#zedLaunchLetterZ {
+	    image: url(skin:/images/zed_launch_z.svg);
+		min-width:108px; max-width:108px;
+		min-height:132px; max-height:132px;
+	  }
+	  QLabel#zedLaunchLetterE {
+	    image: url(skin:/images/zed_launch_e.svg);
+		min-width:108px; max-width:108px;
+		min-height:132px; max-height:132px;
+	  }
+	  QLabel#zedLaunchLetterD {
+	    image: url(skin:/images/zed_launch_d.svg);
+		min-width:108px; max-width:108px;
+		min-height:132px; max-height:132px;
+	  }
+		QProgressBar {
+	    background-color: #10161b;
+		border:none;
+		padding:0;
+		margin-top:8px;
+		min-width:328px;
+		max-width:328px;
+		min-height:3px;
+		max-height:3px;
 		
 	  }
 
 	  QProgressBar::chunk {
-	    background-color: #ffffff;
+	    background-color: #35d8f2;
 	  }
 	</LaunchImageStyle>
 
