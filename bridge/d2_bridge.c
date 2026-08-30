@@ -106,6 +106,8 @@ struct d2_screen_state {
     float stem_volume[4];
     int stem_muted[4];
     int browse_focus; /* 0 = track list, 1 = library tree */
+    int browse_sort_column; /* Mixxx TrackModel::SortColumnId */
+    int browse_sort_order;  /* 0 = ascending, 1 = descending */
     float hotcue_position[8];
     uint32_t hotcue_color[8];
     int playing;
@@ -120,10 +122,12 @@ static struct d2_screen_state d2_screen_state[D2_ASSET_SLOTS] = {
     {0},
     {.rate = 1.0f, .zoom_level = 2,
      .loop_size = 4.0f,
+     .browse_sort_column = 2,
      .stem_volume = {1,1,1,1}, .title = "DECK 1", .artist = "MIXXX",
      .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1}},
     {.rate = 1.0f, .zoom_level = 2,
      .loop_size = 4.0f,
+     .browse_sort_column = 2,
      .stem_volume = {1,1,1,1}, .title = "DECK 2", .artist = "MIXXX",
      .hotcue_position = {-1,-1,-1,-1,-1,-1,-1,-1}},
 };
@@ -1753,6 +1757,19 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
             d2_screen_state[deck].browse_focus = browse_focus;
             d2_browse_mark_dirty();
         }
+    } else if (strcmp(key, "BROWSESORT") == 0) {
+        int column = 0;
+        int order = 0;
+        if (sscanf(value, "%d,%d", &column, &order) == 2 &&
+            column >= 0 && column < 128) {
+            order = order != 0;
+            if (d2_screen_state[deck].browse_sort_column != column ||
+                d2_screen_state[deck].browse_sort_order != order) {
+                d2_screen_state[deck].browse_sort_column = column;
+                d2_screen_state[deck].browse_sort_order = order;
+                d2_browse_mark_dirty();
+            }
+        }
     } else if (strcmp(key, "FXTOUCH") == 0) {
         d2_screen_state[deck].fx_touch_mask = atoi(value) & 0x0f;
         d2_fx_touch_updated_us[deck] = d2_monotonic_us();
@@ -2683,10 +2700,22 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     const int accent_g = player == 1 ? 69 : 170;
     const int accent_b = player == 1 ? 66 : 234;
     char context[45];
+    char sort_label[18];
 
-    snprintf(context, sizeof(context), "%.40s",
+    snprintf(context, sizeof(context), "%.31s",
              d2_library_browse.context[0] ?
              d2_library_browse.context : "ALL TRACKS");
+    const char *sort_name = "SORT";
+    if (state) {
+        if (state->browse_sort_column == 2)
+            sort_name = "TITLE";
+        else if (state->browse_sort_column == 15)
+            sort_name = "BPM";
+        else if (state->browse_sort_column == 20)
+            sort_name = "KEY";
+    }
+    snprintf(sort_label, sizeof(sort_label), "%s %s", sort_name,
+             state && state->browse_sort_order ? "DESC" : "ASC");
 
     d2_fill_rect(pixels, 0, 0, WIDTH, HEIGHT, 3, 5, 7);
     d2_fill_rect(pixels, 0, 0, WIDTH, 26, 25, 29, 34);
@@ -2695,6 +2724,7 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     d2_draw_text(pixels, sidebar_open ? "LIBRARY >" : "TRACKS >",
                  54, 5, 1, 205, 213, 220);
     d2_draw_text(pixels, context, 106, 5, 1, 76, 218, 235);
+    d2_draw_text(pixels, sort_label, 374, 5, 1, 224, 229, 116);
     d2_draw_text(pixels, player == 1 ? "A" : "B", 469, 5, 1,
                  accent_r, accent_g, accent_b);
 
@@ -2799,7 +2829,8 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
                      accent_r, accent_g, accent_b);
     } else {
         d2_draw_text(pixels, "BACK: LIBRARY", 5, 256, 1, 190, 198, 207);
-        d2_draw_text(pixels, "TURN: SELECT", 180, 256, 1, 190, 198, 207);
+        d2_draw_text(pixels, "L1:T L2:BPM L3:KEY L4:DIR", 139, 256, 1,
+                     190, 198, 207);
         d2_draw_text(pixels, player == 1 ? "PRESS: LOAD A" : "PRESS: LOAD B",
                      398, 256, 1, accent_r, accent_g, accent_b);
     }
@@ -3809,12 +3840,23 @@ static void feedback_callback(
         ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_FX_1 + fx,
                             led->fx_enabled[fx] ? bright : dim);
 
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_1, bright);
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_2,
-                        screen->keylock ? bright : dim);
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_3, dim);
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_4,
-                        screen->time_mode ? bright : dim);
+    if (d2_screen_view[player] == D2_VIEW_BROWSE) {
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_1,
+                            screen->browse_sort_column == 2 ? bright : dim);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_2,
+                            screen->browse_sort_column == 15 ? bright : dim);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_3,
+                            screen->browse_sort_column == 20 ? bright : dim);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_4,
+                            screen->browse_sort_order ? bright : dim);
+    } else {
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_1, bright);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_2,
+                            screen->keylock ? bright : dim);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_3, dim);
+        ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_LEFT_4,
+                            screen->time_mode ? bright : dim);
+    }
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_RIGHT_1,
                         led->mode == 1 ? bright : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_SCREEN_RIGHT_2,
@@ -4035,7 +4077,10 @@ static int d2_render_browse_test_image(const char *path, int browse_focus,
         entry->rating = row == D2_BROWSE_ROWS / 2 ? 5 : 3;
         entry->available = 1;
     }
-    struct d2_screen_state state = {.browse_focus = browse_focus};
+    struct d2_screen_state state = {
+        .browse_focus = browse_focus,
+        .browse_sort_column = 2,
+    };
     d2_render_browse_fast(pixels, 1, &state);
     if (notice != D2_BROWSE_NOTICE_NONE)
         d2_draw_browse_notice(pixels, notice);
@@ -4305,6 +4350,13 @@ static int d2_hud_parser_render_contract_test(uint8_t *pixels)
     if (d2_screen_state[1].zoom_level != 8 ||
         d2_test_render_hud_region(pixels, 0, 49, 32, 14) == before) {
         failure = "hud-zoom";
+        goto cleanup;
+    }
+
+    d2_parse_test_message("D2|1|BROWSESORT|15,1");
+    if (d2_screen_state[1].browse_sort_column != 15 ||
+        d2_screen_state[1].browse_sort_order != 1) {
+        failure = "browse-sort-state";
         goto cleanup;
     }
 

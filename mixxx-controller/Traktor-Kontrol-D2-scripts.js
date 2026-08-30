@@ -22,9 +22,11 @@ D2.sentState = {};
 D2.stemsSupported = false;
 D2.phaseTimer = null;
 D2.browseSnapshotTimer = null;
+D2.browseSortTimer = null;
 D2.positionConnections = [];
 D2.positionLastSentAt = {"[Channel1]": 0, "[Channel2]": 0};
 D2.browseSnapshotDelayMs = 45;
+D2.browseSortColumn = {title: 2, bpm: 15, key: 20};
 D2.phaseBeatStep = {"[Channel1]": 0, "[Channel2]": 0};
 D2.phaseBeatActive = {"[Channel1]": false, "[Channel2]": false};
 D2.padHeldMask = {"[Channel1]": 0, "[Channel2]": 0};
@@ -633,6 +635,42 @@ D2.publishBrowseSnapshot = function(force) {
     }
 };
 
+/* TrackModel::SortColumnId values are a stable controller API in Mixxx.
+ * Keep sorting inside Mixxx's library model so the zed table and both D2
+ * displays always expose the same row order. */
+D2.publishBrowseSortState = function(force) {
+    var column = Math.round(Number(
+        engine.getValue("[Library]", "sort_column")) || 0);
+    var order = engine.getValue("[Library]", "sort_order") ? 1 : 0;
+    var value = column + "," + order;
+    D2.sendState("[Channel1]", "BROWSESORT", value, !!force);
+    D2.sendState("[Channel2]", "BROWSESORT", value, !!force);
+};
+
+D2.browseSortChanged = function() {
+    /* One user action can update both sort_column and sort_order. Collapse
+     * those callbacks into one library refresh to protect MIDI/USB latency. */
+    if (D2.browseSortTimer) engine.stopTimer(D2.browseSortTimer);
+    D2.browseSortTimer = engine.beginTimer(40, function() {
+        D2.browseSortTimer = null;
+        D2.publishBrowseSortState(true);
+        D2.refreshBrowseUntilSettled();
+    }, true);
+};
+
+D2.sortBrowseByColumn = function(column) {
+    engine.setValue("[Library]", "sort_column_toggle", column);
+    /* Sorting/reselection is asynchronous in the table model. Publish the
+     * indicator now and refresh the compact nine-row window after it settles. */
+    D2.browseSortChanged();
+};
+
+D2.toggleBrowseSortOrder = function() {
+    var descending = engine.getValue("[Library]", "sort_order") ? 1 : 0;
+    engine.setValue("[Library]", "sort_order", descending ? 0 : 1);
+    D2.browseSortChanged();
+};
+
 D2.queueBrowseSnapshot = function(delayMs, force) {
     if (D2.browseSnapshotTimer) {
         engine.stopTimer(D2.browseSnapshotTimer);
@@ -674,6 +712,7 @@ D2.browseTouch = function(channel, control, value, status, group) {
         engine.setValue("[Library]", "focused_widget", 3);
         D2.sendState("[Channel1]", "BROWSEFOCUS", 0, true);
         D2.sendState("[Channel2]", "BROWSEFOCUS", 0, true);
+        D2.publishBrowseSortState(true);
         engine.beginTimer(60, D2.refreshBrowseModel, true);
     }
 };
@@ -863,6 +902,12 @@ D2.init = function(id, debugging) {
     }
     D2.browseConnection = engine.makeConnection(
         "[Library]", "selected_track_id", D2.browseSelectionChanged);
+    D2.browseSortConnections = [
+        engine.makeConnection("[Library]", "sort_column",
+            D2.browseSortChanged),
+        engine.makeConnection("[Library]", "sort_order",
+            D2.browseSortChanged)
+    ];
     engine.beginTimer(250, function() {
         /* Startup can expose restored decks just after init(). The immediate
          * updateDisplays() path wins when state is already ready; this timer
@@ -876,6 +921,7 @@ D2.init = function(id, debugging) {
     /* One eager snapshot at startup gives both displays usable data. Every
      * subsequent selection change is debounced by browseSelectionChanged(). */
     D2.publishBrowseSnapshot(true);
+    D2.publishBrowseSortState(true);
     /* Full state is event-driven; this is only a low-rate resilience snapshot.
      * Position is sent from the engine's actual playposition callback above. */
     D2.displayTimer = engine.beginTimer(500, D2.updateDisplays);
@@ -932,6 +978,12 @@ D2.shutdown = function() {
             D2.loadOutcomeConnections[outcomeConnection].disconnect();
     }
     if (D2.browseConnection) D2.browseConnection.disconnect();
+    if (D2.browseSortConnections) {
+        for (var sortConnection = 0;
+             sortConnection < D2.browseSortConnections.length;
+             sortConnection++)
+            D2.browseSortConnections[sortConnection].disconnect();
+    }
     if (D2.hotcueConnections) {
         for (var cueConnection = 0; cueConnection < D2.hotcueConnections.length;
              cueConnection++)
@@ -973,6 +1025,7 @@ D2.shutdown = function() {
     if (D2.displayTimer) engine.stopTimer(D2.displayTimer);
     if (D2.phaseTimer) engine.stopTimer(D2.phaseTimer);
     if (D2.browseSnapshotTimer) engine.stopTimer(D2.browseSnapshotTimer);
+    if (D2.browseSortTimer) engine.stopTimer(D2.browseSortTimer);
     D2.trackLoadConnections = null;
     D2.loadRejectedConnections = null;
     D2.loadOutcomeConnections = null;
@@ -984,9 +1037,11 @@ D2.shutdown = function() {
     D2.fxStateConnections = null;
     D2.samplerStateConnections = null;
     D2.browseConnection = null;
+    D2.browseSortConnections = null;
     D2.displayTimer = null;
     D2.phaseTimer = null;
     D2.browseSnapshotTimer = null;
+    D2.browseSortTimer = null;
 };
 
 D2.shiftButton = function(channel, control, value, status, group) {
@@ -1180,6 +1235,21 @@ D2.leftScreenButton = function(channel, control, value, status, group) {
     if (!value) return;
     var activeGroup = D2.activeGroup(group);
     var button = control - 0x31;
+    /* Browse-context controls: L1 Title, L2 BPM, L3 Key and L4 direction.
+     * The same physical buttons retain their established player functions
+     * as soon as the zed Player page is restored. */
+    if (Number(engine.getValue("[Tab]", "current")) ===
+            D2.skinPage.browse) {
+        if (button === 0)
+            D2.sortBrowseByColumn(D2.browseSortColumn.title);
+        else if (button === 1)
+            D2.sortBrowseByColumn(D2.browseSortColumn.bpm);
+        else if (button === 2)
+            D2.sortBrowseByColumn(D2.browseSortColumn.key);
+        else if (button === 3)
+            D2.toggleBrowseSortOrder();
+        return;
+    }
     if (button === 0) {
         D2.zoomLevel[group] = D2.zoomLevel[group] === 2 ? 4 :
                               (D2.zoomLevel[group] === 4 ? 8 : 2);

@@ -146,9 +146,29 @@ groups.forEach(function(group) {
     values[k("[Library]", "focused_widget")] = 3;
     if (typeof D2.loadSelectedTrack !== "undefined")
         throw new Error("track-list press still has a duplicate JS load path");
-    for (var note = 0x31; note <= 0x34; note++)
-        D2.leftScreenButton(0, note, 0x7F, 0, group);
-    for (note = 0x35; note <= 0x38; note++)
+    var sortStart = calls.length;
+    D2.leftScreenButton(0, 0x31, 0x7F, 0, group);
+    D2.leftScreenButton(0, 0x32, 0x7F, 0, group);
+    D2.leftScreenButton(0, 0x33, 0x7F, 0, group);
+    D2.leftScreenButton(0, 0x34, 0x7F, 0, group);
+    var sortCalls = calls.slice(sortStart);
+    [2, 15, 20].forEach(function(column) {
+        if (!sortCalls.some(function(call) {
+            return call[0] === "value" && call[1] === "[Library]" &&
+                call[2] === "sort_column_toggle" && call[3] === column;
+        })) throw new Error("Browse sort column was not dispatched: " + column);
+    });
+    if (!sortCalls.some(function(call) {
+        return call[0] === "value" && call[1] === "[Library]" &&
+            call[2] === "sort_order";
+    })) throw new Error("Browse sort direction was not toggled");
+    values[k("[Tab]", "current")] = D2.skinPage.player;
+    var zoomBefore = D2.zoomLevel[group];
+    D2.leftScreenButton(0, 0x31, 0x7F, 0, group);
+    if (D2.zoomLevel[group] === zoomBefore)
+        throw new Error("player-context left screen controls were replaced by Browse sort");
+    values[k("[Tab]", "current")] = D2.skinPage.browse;
+    for (var note = 0x35; note <= 0x38; note++)
         D2.rightScreenButton(0, note, 0x7F, 0, group);
     ["HOTCUE", "LOOP", "FREEZE", "SAMPLER", "BEATJUMP"].forEach(function(mode) {
         D2.setPerformanceMode(group, mode);

@@ -45,6 +45,8 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 - Three-band waveform, overview, beat grid, phase meter, BPM, key, loop and hotcue state
 - Exact deck `track_id` identity for title, artist, file location, waveform and beatmap loading
 - Dark Nexus-style browser with title, artist, BPM and key columns
+- Browse-context sorting from the four left screen buttons: Title, BPM, Key,
+  and ascending/descending order, with the active sort shown in the header
 - Per-deck Zed FX bars backed by the same Effect Unit state as both D2s
 - Live EffectManifest names on the D2 FX overlay (no numeric effect indexes)
 - Mixxx controller JavaScript, MIDI XML and regression tests
