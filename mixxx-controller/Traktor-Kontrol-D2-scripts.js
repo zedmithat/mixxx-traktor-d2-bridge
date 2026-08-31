@@ -23,6 +23,9 @@ D2.stemsSupported = false;
 D2.phaseTimer = null;
 D2.browseSnapshotTimer = null;
 D2.browseSortTimer = null;
+D2.smartMenu = {"[Channel1]": false, "[Channel2]": false};
+D2.smartIndex = {"[Channel1]": 0, "[Channel2]": 0};
+D2.smartListCount = 6;
 D2.positionConnections = [];
 D2.positionLastSentAt = {"[Channel1]": 0, "[Channel2]": 0};
 D2.browseSnapshotDelayMs = 45;
@@ -705,8 +708,45 @@ D2.refreshBrowseUntilSettled = function() {
     });
 };
 
+D2.publishSmartMenu = function(group, force) {
+    D2.sendState(group, "SMARTMENU",
+        (D2.smartMenu[group] ? 1 : 0) + "," + D2.smartIndex[group], !!force);
+};
+
+D2.closeSmartMenu = function(group) {
+    D2.smartMenu[group] = false;
+    D2.publishSmartMenu(group, true);
+};
+
+D2.toggleSmartMenu = function(group) {
+    D2.smartMenu[group] = !D2.smartMenu[group];
+    if (D2.smartMenu[group]) {
+        D2.smartIndex[group] = 0;
+        D2.libraryFocus = 0;
+        engine.setValue("[Library]", "focused_widget", 3);
+        D2.sendState(group, "BROWSEFOCUS", 0, true);
+    }
+    D2.publishSmartMenu(group, true);
+};
+
+D2.activateSmartList = function(group) {
+    if (!D2.smartMenu[group]) return;
+    var activeGroup = D2.activeGroup(group);
+    var bpm = D2.displayBpm(activeGroup);
+    var key = Number(engine.getValue(activeGroup, "visual_key")) || 0;
+    engine.setValue("[Library]", "d2_smart_bpm", bpm);
+    engine.setValue("[Library]", "d2_smart_key", key);
+    engine.setValue("[Library]", "d2_smart_list", D2.smartIndex[group] + 1);
+    engine.setValue("[Library]", "d2_smart_list", 0);
+    D2.closeSmartMenu(group);
+    D2.libraryFocus = 0;
+    D2.sendState(group, "BROWSEFOCUS", 0, true);
+    D2.refreshBrowseUntilSettled();
+};
+
 D2.browseTouch = function(channel, control, value, status, group) {
     if (value === 0x7F) {
+        D2.closeSmartMenu(group);
         D2.libraryFocus = 0;
         engine.setValue("[Tab]", "current", D2.skinPage.browse);
         engine.setValue("[Library]", "focused_widget", 3);
@@ -725,6 +765,13 @@ D2.browseEncoder = function(channel, control, value, status, group) {
      * 63 (counter-clockwise).  Do not treat every value below 64 as
      * clockwise: 63 was the bug that made both directions move down. */
     var clockwise = value === 0x41;
+    if (D2.smartMenu[group]) {
+        var direction = clockwise ? 1 : -1;
+        D2.smartIndex[group] = (D2.smartIndex[group] + direction +
+            D2.smartListCount) % D2.smartListCount;
+        D2.publishSmartMenu(group, true);
+        return;
+    }
     var controlName = D2.libraryFocus ?
         (clockwise ? "d2_sidebar_down" : "d2_sidebar_up") :
         (clockwise ? "d2_track_down" : "d2_track_up");
@@ -739,6 +786,10 @@ D2.browseEncoder = function(channel, control, value, status, group) {
 
 D2.sidebarActivate = function(channel, control, value, status, group) {
     if (!value) return;
+    if (D2.smartMenu[group]) {
+        D2.activateSmartList(group);
+        return;
+    }
     /* The bridge emits this handler only while the Library tree owns Browse.
      * Track-list presses remain the single native LoadSelectedTrack binding. */
     var isLeaf = engine.getValue("[Library]", "d2_sidebar_is_leaf") > 0;
@@ -751,6 +802,10 @@ D2.sidebarActivate = function(channel, control, value, status, group) {
 
 D2.backButton = function(channel, control, value, status, group) {
     if (!value) return;
+    if (D2.smartMenu[group]) {
+        D2.closeSmartMenu(group);
+        return;
+    }
     /* Select the exact widget. Tab traversal is skin-dependent and could land
      * on Search instead of the Sidebar in compact two-deck layouts. */
     D2.libraryFocus = D2.libraryFocus ? 0 : 1;
@@ -769,6 +824,10 @@ D2.init = function(id, debugging) {
     D2.fxTouchMask["[Channel2]"] = 0;
     D2.padHeldMask["[Channel1]"] = 0;
     D2.padHeldMask["[Channel2]"] = 0;
+    D2.smartMenu["[Channel1]"] = false;
+    D2.smartMenu["[Channel2]"] = false;
+    D2.smartIndex["[Channel1]"] = 0;
+    D2.smartIndex["[Channel2]"] = 0;
     D2.setDisplayView("[Channel1]", "DECK");
     D2.setDisplayView("[Channel2]", "DECK");
     D2.trackLoadConnections = [];
@@ -957,6 +1016,7 @@ D2.shutdown = function() {
         D2.faderTouched[surfaceGroup] = 0;
         D2.loopTouched[surfaceGroup] = false;
         D2.padHeldMask[surfaceGroup] = 0;
+        D2.closeSmartMenu(surfaceGroup);
         D2.setBeatgridEdit(surfaceGroup, false);
         D2.sendState(surfaceGroup, "FXTOUCH", 0, true);
         D2.sendState(surfaceGroup, "LEDOFF", 1, true);
@@ -1268,6 +1328,11 @@ D2.leftScreenButton = function(channel, control, value, status, group) {
 D2.rightScreenButton = function(channel, control, value, status, group) {
     if (!value) return;
     var button = control - 0x35;
+    if (Number(engine.getValue("[Tab]", "current")) ===
+            D2.skinPage.browse) {
+        if (button === 0) D2.toggleSmartMenu(group);
+        return;
+    }
     if (button === 0) D2.setPerformanceMode(group, "HOTCUE");
     else if (button === 1) D2.setPerformanceMode(group, "LOOP");
     else if (button === 2) D2.setPerformanceMode(group, "BEATJUMP");

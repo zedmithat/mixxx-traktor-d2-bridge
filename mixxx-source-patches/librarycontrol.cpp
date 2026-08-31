@@ -1,7 +1,11 @@
 #include "library/librarycontrol.h"
 
+#include <cmath>
+
 #include <QApplication>
+#include <QDate>
 #include <QKeyEvent>
+#include <QLocale>
 #include <QModelIndex>
 #include <QSaveFile>
 #include <QTextStream>
@@ -16,6 +20,7 @@
 #include "library/libraryview.h"
 #include "mixer/playermanager.h"
 #include "track/trackid.h"
+#include "track/keyutils.h"
 #include "moc_librarycontrol.cpp"
 #include "util/cmdlineargs.h"
 #include "widget/wlibrary.h"
@@ -197,6 +202,21 @@ LibraryControl::LibraryControl(Library* pLibrary)
             ConfigKey("[Library]", "d2_sidebar_activate"));
     m_pD2SidebarIsLeaf = std::make_unique<ControlObject>(
             ConfigKey("[Library]", "d2_sidebar_is_leaf"));
+    m_pD2SmartBpm = std::make_unique<ControlObject>(
+            ConfigKey("[Library]", "d2_smart_bpm"));
+    m_pD2SmartKey = std::make_unique<ControlObject>(
+            ConfigKey("[Library]", "d2_smart_key"));
+    m_pD2SmartList = std::make_unique<ControlObject>(
+            ConfigKey("[Library]", "d2_smart_list"));
+    connect(m_pD2SmartList.get(),
+            &ControlObject::valueChanged,
+            this,
+            [this](double value) {
+                const int smartListId = static_cast<int>(std::lround(value));
+                if (smartListId > 0) {
+                    applyD2SmartList(smartListId);
+                }
+            });
     connect(m_pD2SidebarActivate.get(),
             &ControlPushButton::valueChanged,
             this,
@@ -204,6 +224,7 @@ LibraryControl::LibraryControl(Library* pLibrary)
                 if (value <= 0 || !m_pSidebarWidget) {
                     return;
                 }
+                m_d2SmartListLabel.clear();
                 if (m_pSidebarWidget->isLeafNodeSelected()) {
                     setLibraryFocus(FocusWidget::TracksTable);
                 } else {
@@ -982,7 +1003,10 @@ void LibraryControl::writeD2BrowseState() {
     }
     QTextStream stream(&file);
     stream << "D2LIB1\n";
-    stream << "CONTEXT\t" << clean(m_pSidebarWidget->d2SelectedItemLabel()) << '\n';
+    const QString context = m_d2SmartListLabel.isEmpty()
+            ? m_pSidebarWidget->d2SelectedItemLabel()
+            : m_d2SmartListLabel;
+    stream << "CONTEXT\t" << clean(context) << '\n';
     stream << "TRACK\t" << trackWindowRow << '\t' << trackCount << '\n';
     stream << "SIDEBAR\t" << sidebarWindowRow << '\t' << sidebarCount << '\n';
     for (int i = 0; i < 9; ++i) {
@@ -990,6 +1014,79 @@ void LibraryControl::writeD2BrowseState() {
     }
     stream.flush();
     file.commit();
+}
+
+void LibraryControl::applyD2SmartList(int smartListId) {
+    if (!m_pLibraryWidget || !m_pSidebarWidget || !m_pSearchbox) {
+        return;
+    }
+
+    QString query;
+    QString label;
+    switch (smartListId) {
+    case 1: {
+        label = QStringLiteral("MATCH CURRENT DECK");
+        const double bpm = m_pD2SmartBpm->get();
+        const int keyValue = static_cast<int>(std::lround(m_pD2SmartKey->get()));
+        QString bpmFilter;
+        if (std::isfinite(bpm) && bpm > 0.0) {
+            bpmFilter = QStringLiteral("bpm:%1-%2")
+                    .arg(QString::number(bpm * 0.96, 'f', 2),
+                            QString::number(bpm * 1.04, 'f', 2));
+        }
+        const auto key = KeyUtils::keyFromNumericValue(keyValue);
+        const auto compatibleKeys = KeyUtils::getCompatibleKeys(key);
+        QStringList alternatives;
+        for (const auto compatibleKey : compatibleKeys) {
+            const QString keyText = KeyUtils::keyToString(
+                    compatibleKey, KeyUtils::KeyNotation::Lancelot);
+            if (!keyText.isEmpty()) {
+                alternatives.append(QStringLiteral("%1 key:%2")
+                        .arg(bpmFilter, keyText).trimmed());
+            }
+        }
+        query = alternatives.isEmpty() ? bpmFilter
+                                       : alternatives.join(QStringLiteral(" OR "));
+        break;
+    }
+    case 2: {
+        label = QStringLiteral("RECENTLY ADDED");
+        const QString date = QLocale().toString(
+                QDate::currentDate().addDays(-30), QLocale::ShortFormat);
+        query = QStringLiteral("added:>=%1").arg(date);
+        break;
+    }
+    case 3:
+        label = QStringLiteral("UNPLAYED");
+        query = QStringLiteral("played:0");
+        break;
+    case 4:
+        label = QStringLiteral("4+ STARS");
+        query = QStringLiteral("rating:>=4");
+        break;
+    case 5:
+        label = QStringLiteral("BPM 120-126");
+        query = QStringLiteral("bpm:120-126");
+        break;
+    case 6:
+        label = QStringLiteral("ALL TRACKS");
+        break;
+    default:
+        return;
+    }
+
+    // Activate the authoritative Mixxx Tracks model before searching. The D2
+    // therefore keeps native selection, sorting, missing-file and load policy.
+    if (!m_pSidebarWidget->d2ActivateVisibleLabel(QStringLiteral("Tracks"))) {
+        return;
+    }
+    m_d2SmartListLabel = label;
+    m_pSearchbox->slotRestoreSearch(query);
+    m_pLibraryWidget->search(query);
+    setLibraryFocus(FocusWidget::TracksTable);
+    scheduleD2BrowseUpdate(60);
+    QTimer::singleShot(220, this, &LibraryControl::updateSelectedTrackId);
+    QTimer::singleShot(650, this, &LibraryControl::updateSelectedTrackId);
 }
 
 void LibraryControl::slotScrollUp(double v) {

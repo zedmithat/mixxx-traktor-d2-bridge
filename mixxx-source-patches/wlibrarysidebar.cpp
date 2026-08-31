@@ -472,6 +472,25 @@ int WLibrarySidebar::d2VisibleRowCount() {
     return count;
 }
 
+bool WLibrarySidebar::d2ActivateVisibleLabel(const QString& label) {
+    if (!model() || label.isEmpty()) {
+        return false;
+    }
+    QModelIndex index = model()->index(0, 0, QModelIndex());
+    while (index.isValid()) {
+        if (index.data(Qt::DisplayRole).toString().compare(
+                    label, Qt::CaseInsensitive) == 0) {
+            selectIndex(index);
+            // Use the same activation signal as a real sidebar click so the
+            // desktop Library and the D2 compact window share one TrackModel.
+            emit clicked(index);
+            return true;
+        }
+        index = indexBelow(index);
+    }
+    return false;
+}
+
 /// Refocus the selected item after right-click
 void WLibrarySidebar::focusSelectedIndex() {
     // After the context menu was activated (and closed, with or without clicking

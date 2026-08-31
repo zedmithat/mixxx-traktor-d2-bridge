@@ -108,6 +108,8 @@ struct d2_screen_state {
     int browse_focus; /* 0 = track list, 1 = library tree */
     int browse_sort_column; /* Mixxx TrackModel::SortColumnId */
     int browse_sort_order;  /* 0 = ascending, 1 = descending */
+    int smart_menu;
+    int smart_index;
     float hotcue_position[8];
     uint32_t hotcue_color[8];
     int playing;
@@ -1770,6 +1772,19 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
                 d2_browse_mark_dirty();
             }
         }
+    } else if (strcmp(key, "SMARTMENU") == 0) {
+        int enabled = 0;
+        int index = 0;
+        if (sscanf(value, "%d,%d", &enabled, &index) == 2 &&
+            index >= 0 && index < 6) {
+            enabled = enabled != 0;
+            if (d2_screen_state[deck].smart_menu != enabled ||
+                d2_screen_state[deck].smart_index != index) {
+                d2_screen_state[deck].smart_menu = enabled;
+                d2_screen_state[deck].smart_index = index;
+                d2_browse_mark_dirty();
+            }
+        }
     } else if (strcmp(key, "FXTOUCH") == 0) {
         d2_screen_state[deck].fx_touch_mask = atoi(value) & 0x0f;
         d2_fx_touch_updated_us[deck] = d2_monotonic_us();
@@ -2683,9 +2698,80 @@ static int d2_load_library_browse_state(void)
     return 1;
 }
 
+static void d2_render_smart_lists(uint8_t *pixels, int player,
+                                  const struct d2_screen_state *state)
+{
+    static const char *const names[] = {
+        "MATCH CURRENT DECK",
+        "RECENTLY ADDED",
+        "UNPLAYED",
+        "4+ STARS",
+        "BPM 120-126",
+        "ALL TRACKS",
+    };
+    static const char *const descriptions[] = {
+        "BPM + HARMONIC KEY",
+        "ADDED IN LAST 30 DAYS",
+        "PLAY COUNT IS ZERO",
+        "RATING FOUR OR HIGHER",
+        "FIXED TEMPO RANGE",
+        "CLEAR SMART FILTER",
+    };
+    const int accent_r = player == 1 ? 236 : 28;
+    const int accent_g = player == 1 ? 69 : 170;
+    const int accent_b = player == 1 ? 66 : 234;
+    int selected = state ? state->smart_index : 0;
+    if (selected < 0 || selected >= 6)
+        selected = 0;
+
+    d2_fill_rect(pixels, 0, 0, WIDTH, HEIGHT, 3, 5, 7);
+    d2_fill_rect(pixels, 0, 0, WIDTH, 30, 25, 29, 34);
+    d2_fill_rect(pixels, 0, 29, WIDTH, 1, 0, 144, 174);
+    d2_draw_text(pixels, "BROWSER >", 5, 7, 1, 188, 198, 208);
+    d2_draw_text(pixels, "SMART LISTS", 60, 7, 1, 76, 218, 235);
+    d2_draw_text(pixels, player == 1 ? "A" : "B", 469, 7, 1,
+                 accent_r, accent_g, accent_b);
+
+    for (int row = 0; row < 6; ++row) {
+        const int y = 34 + row * 34;
+        const int active = row == selected;
+        d2_fill_rect(pixels, 8, y, 464, 31,
+                     active ? 5 : (row & 1 ? 8 : 5),
+                     active ? 22 : (row & 1 ? 11 : 8),
+                     active ? 27 : (row & 1 ? 15 : 11));
+        d2_fill_rect(pixels, 8, y + 30, 464, 1, 28, 34, 40);
+        if (active) {
+            d2_fill_rect(pixels, 8, y, 3, 31, 0, 185, 215);
+            d2_fill_rect(pixels, 8, y, 464, 1, 0, 144, 174);
+            d2_fill_rect(pixels, 8, y + 29, 464, 1, 0, 144, 174);
+        }
+        d2_draw_text(pixels, active ? ">" : " ", 16, y + 10, 1,
+                     255, 255, 255);
+        d2_draw_text(pixels, names[row], 34, y + 4, 2,
+                     active ? 133 : 225,
+                     active ? 235 : 229,
+                     active ? 250 : 235);
+        d2_draw_text(pixels, descriptions[row], 292, y + 11, 1,
+                     active ? 190 : 125,
+                     active ? 214 : 139,
+                     active ? 222 : 151);
+    }
+
+    d2_fill_rect(pixels, 0, 252, WIDTH, 20, 19, 23, 28);
+    d2_fill_rect(pixels, 0, 251, WIDTH, 1, 50, 58, 66);
+    d2_draw_text(pixels, "BACK: TRACKS", 5, 256, 1, 190, 198, 207);
+    d2_draw_text(pixels, "TURN: SELECT", 184, 256, 1, 190, 198, 207);
+    d2_draw_text(pixels, "PRESS: OPEN", 400, 256, 1,
+                 accent_r, accent_g, accent_b);
+}
+
 static void d2_render_browse_fast(uint8_t *pixels, int player,
                                   const struct d2_screen_state *state)
 {
+    if (state && state->smart_menu) {
+        d2_render_smart_lists(pixels, player, state);
+        return;
+    }
     int track_selected_row = d2_library_browse.track_row;
     int sidebar_selected_row = d2_library_browse.sidebar_row;
     if (track_selected_row < 0 || track_selected_row >= D2_BROWSE_ROWS)
@@ -2831,6 +2917,7 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
         d2_draw_text(pixels, "BACK: LIBRARY", 5, 256, 1, 190, 198, 207);
         d2_draw_text(pixels, "L1:T L2:BPM L3:KEY L4:DIR", 139, 256, 1,
                      190, 198, 207);
+        d2_draw_text(pixels, "R1:SMART", 326, 256, 1, 76, 218, 235);
         d2_draw_text(pixels, player == 1 ? "PRESS: LOAD A" : "PRESS: LOAD B",
                      398, 256, 1, accent_r, accent_g, accent_b);
     }
@@ -3593,13 +3680,14 @@ static void event_callback_locked(
                         d2_screen_view[player] = D2_VIEW_BROWSE;
                         d2_browse_mark_dirty();
                     }
-                    browse_note =
-                        d2_screen_state[player].browse_focus ? 61 : 62;
+                    browse_note = d2_screen_state[player].smart_menu ? 61 :
+                        (d2_screen_state[player].browse_focus ? 61 : 62);
                     browse_press_note[player] = (uint8_t)browse_note;
                 } else {
                     browse_note = browse_press_note[player] ?
                         browse_press_note[player] :
-                        (d2_screen_state[player].browse_focus ? 61 : 62);
+                        (d2_screen_state[player].smart_menu ? 61 :
+                         (d2_screen_state[player].browse_focus ? 61 : 62));
                     browse_press_note[player] = 0;
                 }
 
@@ -4078,8 +4166,10 @@ static int d2_render_browse_test_image(const char *path, int browse_focus,
         entry->available = 1;
     }
     struct d2_screen_state state = {
-        .browse_focus = browse_focus,
+        .browse_focus = browse_focus == 1,
         .browse_sort_column = 2,
+        .smart_menu = browse_focus == 2,
+        .smart_index = 0,
     };
     d2_render_browse_fast(pixels, 1, &state);
     if (notice != D2_BROWSE_NOTICE_NONE)
@@ -5215,6 +5305,12 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--render-browse-sidebar-test") == 0) {
         int result = d2_render_browse_test_image(
             argv[2], 1, D2_BROWSE_NOTICE_NONE);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-smart-lists-test") == 0) {
+        int result = d2_render_browse_test_image(
+            argv[2], 2, D2_BROWSE_NOTICE_NONE);
         d2_font_shutdown();
         return result;
     }

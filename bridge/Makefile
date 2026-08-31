@@ -64,9 +64,11 @@ test-js:
 	$(NODE) ../tests/test_d2_comprehensive.js
 	$(NODE) ../tests/test_d2_load_polling.js
 	$(NODE) ../tests/test_d2_fx_roundtrip.js
+	$(NODE) ../tests/test_d2_smart_playlists.js
 	$(PYTHON) ../tests/test_zed_fx_layout.py
 	$(PYTHON) ../tests/test_time_display_modes.py
 	$(PYTHON) ../tests/test_zed_launch_animation.py
+	$(PYTHON) ../tests/test_d2_smart_playlist_source.py
 
 clean:
 	rm -f $(OUTPUT_DIR)/d2_bridge_metadata \
