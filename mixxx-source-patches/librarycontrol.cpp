@@ -206,6 +206,10 @@ LibraryControl::LibraryControl(Library* pLibrary)
             ConfigKey("[Library]", "d2_smart_bpm"));
     m_pD2SmartKey = std::make_unique<ControlObject>(
             ConfigKey("[Library]", "d2_smart_key"));
+    m_pD2SmartActive = std::make_unique<ControlObject>(
+            ConfigKey("[Library]", "d2_smart_active"));
+    m_pD2SmartActive->setReadOnly();
+    m_pD2SmartActive->setAndConfirm(0.0);
     m_pD2SmartList = std::make_unique<ControlObject>(
             ConfigKey("[Library]", "d2_smart_list"));
     connect(m_pD2SmartList.get(),
@@ -217,6 +221,43 @@ LibraryControl::LibraryControl(Library* pLibrary)
                     applyD2SmartList(smartListId);
                 }
             });
+    const std::array<QString, 6> desktopSmartListControls = {
+            QStringLiteral("smart_match_deck"),
+            QStringLiteral("smart_recent"),
+            QStringLiteral("smart_unplayed"),
+            QStringLiteral("smart_rating"),
+            QStringLiteral("smart_bpm_120_126"),
+            QStringLiteral("smart_all_tracks")};
+    for (std::size_t i = 0; i < desktopSmartListControls.size(); ++i) {
+        m_pDesktopSmartLists[i] = std::make_unique<ControlPushButton>(
+                ConfigKey("[Library]", desktopSmartListControls[i]));
+        connect(m_pDesktopSmartLists[i].get(),
+                &ControlPushButton::valueChanged,
+                this,
+                [this, i](double value) {
+                    if (value <= 0) {
+                        return;
+                    }
+                    const int smartListId = static_cast<int>(i) + 1;
+                    if (smartListId == 1) {
+                        const int activeDeck =
+                                ControlObject::get(ConfigKey("[Skin]", "active_deck")) > 0.0
+                                ? 2
+                                : 1;
+                        const QString group =
+                                QStringLiteral("[Channel%1]").arg(activeDeck);
+                        double bpm = ControlObject::get(
+                                ConfigKey(group, "visual_bpm"));
+                        if (!std::isfinite(bpm) || bpm <= 0.0) {
+                            bpm = ControlObject::get(ConfigKey(group, "bpm"));
+                        }
+                        m_pD2SmartBpm->setAndConfirm(bpm);
+                        m_pD2SmartKey->setAndConfirm(ControlObject::get(
+                                ConfigKey(group, "visual_key")));
+                    }
+                    applyD2SmartList(smartListId);
+                });
+    }
     connect(m_pD2SidebarActivate.get(),
             &ControlPushButton::valueChanged,
             this,
@@ -225,6 +266,7 @@ LibraryControl::LibraryControl(Library* pLibrary)
                     return;
                 }
                 m_d2SmartListLabel.clear();
+                m_pD2SmartActive->setAndConfirm(0.0);
                 if (m_pSidebarWidget->isLeafNodeSelected()) {
                     setLibraryFocus(FocusWidget::TracksTable);
                 } else {
@@ -1081,6 +1123,7 @@ void LibraryControl::applyD2SmartList(int smartListId) {
         return;
     }
     m_d2SmartListLabel = label;
+    m_pD2SmartActive->setAndConfirm(smartListId);
     m_pSearchbox->slotRestoreSearch(query);
     m_pLibraryWidget->search(query);
     setLibraryFocus(FocusWidget::TracksTable);

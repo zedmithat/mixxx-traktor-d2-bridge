@@ -153,6 +153,8 @@ class LibraryControl : public QObject {
     std::unique_ptr<ControlObject> m_pD2SmartList;
     std::unique_ptr<ControlObject> m_pD2SmartBpm;
     std::unique_ptr<ControlObject> m_pD2SmartKey;
+    std::unique_ptr<ControlObject> m_pD2SmartActive;
+    std::array<std::unique_ptr<ControlPushButton>, 6> m_pDesktopSmartLists;
     // Five IDs centred on the highlighted row, exported for compact
     // controller displays that need a real library list.
     std::array<std::unique_ptr<ControlObject>, 9> m_pBrowseTrackIds;

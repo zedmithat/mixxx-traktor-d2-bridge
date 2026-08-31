@@ -10,10 +10,14 @@
         <Children>
           <WidgetGroup>
             <ObjectName>SidebarContainer</ObjectName>
-            <Layout>horizontal</Layout>
-            <Size>0me,40f</Size>
+            <Layout>vertical</Layout>
+            <Size>0me,74f</Size>
             <Children>
-            <PushButton>
+              <WidgetGroup>
+                <Layout>horizontal</Layout>
+                <Size>0me,40f</Size>
+                <Children>
+              <PushButton>
                 <ObjectName>SidebarButton</ObjectName>
                 <Size>75f,40f</Size>
                 <NumberStates>2</NumberStates>
@@ -36,7 +40,63 @@
                 <ObjectName>SearchBox</ObjectName>
                 <Size>0me,40f</Size>
               </SearchBox>
-              
+                </Children>
+              </WidgetGroup>
+
+              <WidgetGroup>
+                <ObjectName>SmartListsToolbar</ObjectName>
+                <Layout>horizontal</Layout>
+                <Size>0me,34f</Size>
+                <Children>
+                  <Label>
+                    <ObjectName>SmartListsTitle</ObjectName>
+                    <Size>92f,34f</Size>
+                    <Text>SMART LISTS</Text>
+                  </Label>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>MATCH DECK</Text></State>
+                    <Connection><ConfigKey>[Library],smart_match_deck</ConfigKey></Connection>
+                  </PushButton>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>RECENT 30D</Text></State>
+                    <Connection><ConfigKey>[Library],smart_recent</ConfigKey></Connection>
+                  </PushButton>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>UNPLAYED</Text></State>
+                    <Connection><ConfigKey>[Library],smart_unplayed</ConfigKey></Connection>
+                  </PushButton>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>4+ STARS</Text></State>
+                    <Connection><ConfigKey>[Library],smart_rating</ConfigKey></Connection>
+                  </PushButton>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>BPM 120-126</Text></State>
+                    <Connection><ConfigKey>[Library],smart_bpm_120_126</ConfigKey></Connection>
+                  </PushButton>
+                  <PushButton>
+                    <ObjectName>SmartPresetButton</ObjectName>
+                    <Size>1me,34f</Size>
+                    <NumberStates>1</NumberStates>
+                    <State><Number>0</Number><Text>ALL TRACKS</Text></State>
+                    <Connection><ConfigKey>[Library],smart_all_tracks</ConfigKey></Connection>
+                  </PushButton>
+                </Children>
+              </WidgetGroup>
             </Children>
           </WidgetGroup>
           <WidgetGroup>

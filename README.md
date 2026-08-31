@@ -14,6 +14,15 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 
 ![Traktor D2 Nexus-style browser](docs/d2-functional-browse.png)
 
+### Smart Lists on Zed and D2
+
+The same live Mixxx Tracks model is filtered from either the Zed desktop
+toolbar or the D2 Browse `R1` menu.
+
+![Zed desktop Smart Lists toolbar filtering the live Mixxx library](docs/zed-smart-lists-live.png)
+
+![Traktor D2 480x272 Smart Lists framebuffer](docs/d2-smart-lists.png)
+
 ### Mixxx zed two-deck player skin
 
 ![Live Mixxx zed two-deck player skin with per-deck FX units](docs/zed-main-screen-live.png)
@@ -47,10 +56,11 @@ An experimental Linux integration for using two Native Instruments Traktor Kontr
 - Dark Nexus-style browser with title, artist, BPM and key columns
 - Browse-context sorting from the four left screen buttons: Title, BPM, Key,
   and ascending/descending order, with the active sort shown in the header
-- D2 Smart Lists opened with Browse `R1`: Match Current Deck (live BPM +/-4%
-  plus harmonically compatible keys), Recently Added, Unplayed, 4+ Stars,
-  BPM 120-126 and All Tracks. Presets filter Mixxx's real Tracks model so
-  desktop/D2 results, sorting and safe track loading remain synchronized
+- Synchronized Smart Lists from the Zed desktop toolbar or D2 Browse `R1`:
+  Match Current Deck (live BPM +/-4% plus harmonically compatible keys),
+  Recently Added, Unplayed, 4+ Stars, BPM 120-126 and All Tracks. Presets
+  filter Mixxx's real Tracks model so desktop/D2 results, sorting and safe
+  track loading remain synchronized
 - Zed-only animated Orbitron launch mark with sequential, non-looping `z-e-d`
   vector reveals and no startup delay after the skin is ready
 - Per-deck Zed FX bars backed by the same Effect Unit state as both D2s

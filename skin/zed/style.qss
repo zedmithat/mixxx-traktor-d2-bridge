@@ -511,6 +511,37 @@ WLabel {
   border:none;
 }
 
+#SmartListsToolbar {
+  background-color: #101010;
+  border-top: 1px solid #303030;
+  border-bottom: 1px solid #303030;
+}
+
+#SmartListsTitle {
+  color: #50e6ff;
+  font-size: 12px;
+  font-weight: 600;
+  padding-left: 8px;
+}
+
+#SmartPresetButton {
+  background-color: #181818;
+  color: #e5e6ea;
+  border: 0;
+  border-left: 1px solid #303030;
+  border-bottom: 2px solid #1f6976;
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0;
+  padding: 2px 5px;
+}
+
+#SmartPresetButton:pressed {
+  background-color: #164853;
+  color: #ffffff;
+  border-bottom: 2px solid #50e6ff;
+}
+
 
 
 /************************************************************************/
