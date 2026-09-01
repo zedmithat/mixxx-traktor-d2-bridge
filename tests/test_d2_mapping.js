@@ -184,6 +184,12 @@ groups.forEach(function(group) {
     D2.touchStrip(0, 0x28, 64, 0, group);
     D2.touchStripTouch(0, 0x5E, 0, 0, group);
     D2.captureButton(0, 0x40, 0x7F, 0, group);
+    var usbStart = calls.length;
+    D2.usbOpenButton(0, 0x65, 0x7F, 0, group);
+    if (!calls.slice(usbStart).some(function(call) {
+        return call[0] === "value" && call[1] === "[Library]" &&
+            call[2] === "d2_usb_open" && call[3] === 1;
+    })) throw new Error("Browse CAPTURE did not pulse native USB open");
     D2.editButton(0, 0x41, 0x7F, 0, group);
     D2.screenEncoder(0, 0x10, 0x41, 0, group);
     D2.screenEncoder(0, 0x11, 0x3F, 0, group);

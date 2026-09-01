@@ -33,6 +33,7 @@ class WLibrarySidebar : public QTreeView, public WBaseWidget {
     int d2SelectedVisibleRow();
     int d2VisibleRowCount();
     bool d2ActivateVisibleLabel(const QString& label);
+    bool d2OpenRemovableDevice(const QString& label);
 
   public slots:
     void selectIndex(const QModelIndex&);

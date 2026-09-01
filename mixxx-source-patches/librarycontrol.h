@@ -87,6 +87,10 @@ class LibraryControl : public QObject {
     void scheduleD2BrowseUpdate(int delayMs = 40);
     void writeD2BrowseState();
     void applyD2SmartList(int smartListId);
+    void processZedManagerCommand();
+    int purgeZedManagerMissingTracks();
+    int syncZedManagerFolders();
+    void writeZedManagerMixxxState(const QString& status);
     void slotScrollUp(double);
     void slotScrollDown(double);
     void slotScrollVertical(double);
@@ -149,6 +153,7 @@ class LibraryControl : public QObject {
     std::unique_ptr<ControlPushButton> m_pD2SidebarUp;
     std::unique_ptr<ControlPushButton> m_pD2SidebarDown;
     std::unique_ptr<ControlPushButton> m_pD2SidebarActivate;
+    std::unique_ptr<ControlPushButton> m_pD2UsbOpen;
     std::unique_ptr<ControlObject> m_pD2SidebarIsLeaf;
     std::unique_ptr<ControlObject> m_pD2SmartList;
     std::unique_ptr<ControlObject> m_pD2SmartBpm;
@@ -160,6 +165,9 @@ class LibraryControl : public QObject {
     std::array<std::unique_ptr<ControlObject>, 9> m_pBrowseTrackIds;
     bool m_d2BrowseUpdatePending{false};
     QString m_d2SmartListLabel;
+    QString m_zedManagerScanId;
+    bool m_zedManagerPurgeMissing{false};
+    bool m_zedManagerSyncFolders{false};
 
     // Controls to QUICKLY navigate vertically within currently focused widget (pageup/pagedown buttons)
     std::unique_ptr<ControlPushButton> m_pScrollUp;

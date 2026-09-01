@@ -1487,6 +1487,13 @@ D2.captureButton = function(channel, control, value, status, group) {
     engine.setValue("[Library]", "AutoDjAddBottom", 0);
 };
 
+D2.usbOpenButton = function(channel, control, value, status, group) {
+    if (!value) return;
+    D2.setDisplayView(group, "BROWSE");
+    D2.pulse("[Library]", "d2_usb_open");
+    D2.refreshBrowseUntilSettled();
+};
+
 D2.editButton = function(channel, control, value, status, group) {
     if (!value) return;
     D2.setBeatgridEdit(group, !D2.beatgridEdit[group]);

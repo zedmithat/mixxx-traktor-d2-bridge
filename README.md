@@ -67,6 +67,9 @@ toolbar or the D2 Browse `R1` menu.
 - Live EffectManifest names on the D2 FX overlay (no numeric effect indexes)
 - Mixxx controller JavaScript, MIDI XML and regression tests
 - Recovery hook for reopening Mixxx after the bridge ALSA client changes
+- Authenticated, dependency-free ZED LAN manager for browsing an attached DJ
+  USB, importing selected folders into the local archive, reporting progress,
+  requesting a native Mixxx library scan and safely unmounting the device
 
 ## Repository layout
 
@@ -75,6 +78,7 @@ toolbar or the D2 Browse `R1` menu.
 - `mixxx-source-patches/`: source files/patches used by the custom Mixxx build
 - `skin/zed/`: active two-deck Mixxx skin, derived from XDJ100SX
 - `systemd/`: startup and MIDI recovery integration
+- `web/`: local-only Python standard-library ZED manager
 - `tests/`: Node-based controller regression tests
 - `docs/`: current player and browser render captures
 
@@ -112,6 +116,10 @@ node tests/test_d2_load_polling.js
 node tests/test_d2_fx_roundtrip.js
 python3 tests/test_time_display_modes.py
 python3 tests/test_zed_fx_layout.py
+python3 tests/test_zed_usb_monitor.py
+python3 tests/test_zed_manager.py
+python3 tests/test_zed_folder_playlists.py
+python3 tests/check_c_braces.py
 ```
 
 Expected results:
@@ -124,7 +132,74 @@ D2_LOAD_POLLING_CONTRACT_OK
 D2_FX_ROUNDTRIP_TEST_OK
 TIME_DISPLAY_MODES_TEST_OK
 ZED_FX_LAYOUT_TEST_OK
+ZED_USB_MONITOR_TEST_OK
+ZED_MANAGER_TEST_OK
+ZED_FOLDER_PLAYLIST_TEST_OK
+C_BRACE_TEST_OK
 ```
+
+## ZED local library manager
+
+`web/zed_manager.py` provides a lightweight management page without Flask or
+another runtime dependency. It reads the same removable-media state as both
+D2s, hides operating-system metadata folders, and only imports supported audio
+files. The source USB is never modified. Copies are written to a temporary file
+and atomically renamed, existing identical files are skipped after a byte-wise
+comparison, and conflicting files receive a new name instead of being
+overwritten.
+
+Install the script and user service:
+
+```sh
+install -m 0755 web/zed_manager.py /home/pi/bin/zed-manager.py
+install -m 0644 systemd/zed-manager.service \
+  /home/pi/.config/systemd/user/zed-manager.service
+systemctl --user daemon-reload
+systemctl --user enable --now zed-manager.service
+```
+
+Open `http://PI_ADDRESS:8088`, use the username `zed`, and read the generated
+18-character access key with:
+
+```sh
+cat /home/pi/.config/zed-manager/access-key
+```
+
+The page supports USB folder navigation, explicit selection, import progress,
+cancellation between files, free-space reporting and safe unmount. It also
+provides a restricted remote file manager for `/home/pi/Music/ZED Library`:
+create folders, upload multiple audio files by picker or drag-and-drop, browse
+the local hierarchy, and delete explicitly confirmed files or folders. Uploads
+are streamed to hidden temporary files and atomically renamed; paths, symlinks,
+hidden/system names and unsupported file extensions are rejected.
+
+The explicit **Purge missing records** command first runs Mixxx's native library
+scanner and then passes only tracks marked `fs_deleted=1` to Mixxx's own
+`TrackCollectionManager::purgeTracks()` path. This removes stale references from
+playlists, crates and the database without deleting any existing audio file.
+It is deliberately not run at startup, because a temporarily disconnected USB
+drive must not silently erase otherwise valid library references.
+
+After a completed batch the page publishes one atomic scan command. The patched
+`LibraryControl` consumes that command on Mixxx's GUI thread and starts Mixxx's
+native asynchronous library scanner; the page reports `ACCEPTED`, `SCANNING`
+and `COMPLETE` without writing to `mixxxdb.sqlite` itself. No library scan or
+bulk file copy runs merely because the Pi starts; work begins only after an
+explicit web or USB-import action.
+
+After that scan, every physical folder below `ZED Library` is mirrored through
+Mixxx's native `PlaylistDAO` as a managed playlist named `ZED / Folder / Name`.
+The root is exposed as `ZED / Library`, parent playlists include tracks from
+their descendants, and deleted directories remove only their corresponding
+`ZED / ...` playlists. These entries appear under Playlists on both the desktop
+skin and the D2 browser; unrelated user-created playlists are never modified.
+
+The service is intentionally low-priority (`Nice=15`, idle I/O scheduling) so
+file copies do not compete with audio or D2 USB traffic. It uses HTTP Basic
+authentication plus a per-process CSRF token, but HTTP does not encrypt LAN
+traffic. Use it only on a trusted private network and do not forward port 8088
+to the internet. Stop it with `systemctl --user disable --now
+zed-manager.service` when remote management is not wanted.
 
 ## FX controls
 

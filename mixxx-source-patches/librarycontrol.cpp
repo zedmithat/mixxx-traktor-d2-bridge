@@ -1,13 +1,21 @@
 #include "library/librarycontrol.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <QApplication>
 #include <QDate>
+#include <QDateTime>
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QHash>
 #include <QKeyEvent>
 #include <QLocale>
 #include <QModelIndex>
 #include <QSaveFile>
+#include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
 #include <QWindow>
@@ -18,6 +26,11 @@
 #include "control/controlpushbutton.h"
 #include "library/library.h"
 #include "library/libraryview.h"
+#include "library/dao/playlistdao.h"
+#include "library/dao/trackdao.h"
+#include "library/missing_hidden/missingtablemodel.h"
+#include "library/trackcollection.h"
+#include "library/trackcollectionmanager.h"
 #include "mixer/playermanager.h"
 #include "track/trackid.h"
 #include "track/keyutils.h"
@@ -30,6 +43,15 @@
 
 namespace {
 const QString kAppGroup = QStringLiteral("[App]");
+
+QString zedRuntimeFile(const QString& name) {
+    QString runtimePath =
+            QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (runtimePath.isEmpty()) {
+        runtimePath = QStringLiteral("/run/user/1000");
+    }
+    return QDir(runtimePath).filePath(name);
+}
 } // namespace
 
 LoadToGroupController::LoadToGroupController(LibraryControl* pParent, const QString& group)
@@ -200,6 +222,8 @@ LibraryControl::LibraryControl(Library* pLibrary)
             });
     m_pD2SidebarActivate = std::make_unique<ControlPushButton>(
             ConfigKey("[Library]", "d2_sidebar_activate"));
+    m_pD2UsbOpen = std::make_unique<ControlPushButton>(
+            ConfigKey("[Library]", "d2_usb_open"));
     m_pD2SidebarIsLeaf = std::make_unique<ControlObject>(
             ConfigKey("[Library]", "d2_sidebar_is_leaf"));
     m_pD2SmartBpm = std::make_unique<ControlObject>(
@@ -267,7 +291,12 @@ LibraryControl::LibraryControl(Library* pLibrary)
                 }
                 m_d2SmartListLabel.clear();
                 m_pD2SmartActive->setAndConfirm(0.0);
-                if (m_pSidebarWidget->isLeafNodeSelected()) {
+                WTrackTableView* pTrackTableView = m_pLibraryWidget
+                        ? m_pLibraryWidget->getCurrentTrackTableView()
+                        : nullptr;
+                const bool hasTracks = pTrackTableView &&
+                        pTrackTableView->getBrowseRowCount() > 0;
+                if (m_pSidebarWidget->isLeafNodeSelected() || hasTracks) {
                     setLibraryFocus(FocusWidget::TracksTable);
                 } else {
                     m_pSidebarWidget->toggleSelectedItem();
@@ -275,6 +304,57 @@ LibraryControl::LibraryControl(Library* pLibrary)
                 scheduleD2BrowseUpdate(60);
                 QTimer::singleShot(220, this, &LibraryControl::updateSelectedTrackId);
                 QTimer::singleShot(650, this, &LibraryControl::updateSelectedTrackId);
+            });
+    connect(m_pD2UsbOpen.get(),
+            &ControlPushButton::valueChanged,
+            this,
+            [this](double value) {
+                if (value <= 0 || !m_pSidebarWidget) {
+                    return;
+                }
+                QFile stateFile(QStringLiteral("/run/user/1000/zed-usb-state"));
+                if (!stateFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                    return;
+                }
+                QString label;
+                while (!stateFile.atEnd()) {
+                    const QString line = QString::fromUtf8(stateFile.readLine()).trimmed();
+                    if (line.startsWith(QStringLiteral("LABEL\t"))) {
+                        label = line.mid(6).trimmed();
+                        break;
+                    }
+                }
+                if (label.isEmpty()) {
+                    return;
+                }
+
+                m_d2SmartListLabel.clear();
+                m_pD2SmartActive->setAndConfirm(0.0);
+                if (m_pSearchbox && m_pLibraryWidget) {
+                    m_pSearchbox->slotRestoreSearch(QString());
+                    m_pLibraryWidget->search(QString());
+                }
+                auto activated = std::make_shared<bool>(false);
+                auto activateUsb = [this, label, activated]() {
+                    if (*activated) {
+                        return;
+                    }
+                    if (!m_pSidebarWidget ||
+                            !m_pSidebarWidget->d2OpenRemovableDevice(label)) {
+                        return;
+                    }
+                    *activated = true;
+                    setLibraryFocus(FocusWidget::TracksTable);
+                    scheduleD2BrowseUpdate(60);
+                };
+                // BrowseFeature may populate the removable-device children on
+                // the next UI event. Retry a few bounded times without blocking
+                // the controller/HID thread or spinning over the filesystem.
+                activateUsb();
+                QTimer::singleShot(80, this, activateUsb);
+                QTimer::singleShot(240, this, activateUsb);
+                QTimer::singleShot(650, this, activateUsb);
+                QTimer::singleShot(900, this, &LibraryControl::updateSelectedTrackId);
             });
     for (std::size_t i = 0; i < m_pBrowseTrackIds.size(); ++i) {
         m_pBrowseTrackIds[i] = std::make_unique<ControlObject>(
@@ -702,9 +782,246 @@ LibraryControl::LibraryControl(Library* pLibrary)
                 this,
                 &LibraryControl::updateFocusedWidgetControls);
     }
+
+    // The LAN manager never touches Mixxx's SQLite database. It publishes a
+    // tiny atomic command after a completed file copy; this timer consumes it
+    // on Mixxx's GUI thread and invokes the native asynchronous scanner.
+    auto* pZedManagerTimer = new QTimer(this);
+    pZedManagerTimer->setInterval(500);
+    connect(pZedManagerTimer,
+            &QTimer::timeout,
+            this,
+            &LibraryControl::processZedManagerCommand);
+    pZedManagerTimer->start();
+
+    TrackCollectionManager* pTrackCollectionManager =
+            m_pLibrary->trackCollectionManager();
+    connect(pTrackCollectionManager,
+            &TrackCollectionManager::libraryScanStarted,
+            this,
+            [this]() {
+                if (!m_zedManagerScanId.isEmpty()) {
+                    writeZedManagerMixxxState(QStringLiteral("SCANNING"));
+                }
+            });
+    connect(pTrackCollectionManager,
+            &TrackCollectionManager::libraryScanFinished,
+            this,
+            [this]() {
+                if (!m_zedManagerScanId.isEmpty()) {
+                    if (m_zedManagerPurgeMissing) {
+                        const int purged = purgeZedManagerMissingTracks();
+                        qInfo() << "ZED manager purged" << purged
+                                << "missing track records";
+                    }
+                    if (m_zedManagerSyncFolders) {
+                        const int synced = syncZedManagerFolders();
+                        qInfo() << "ZED manager synced" << synced
+                                << "local folder playlists";
+                    }
+                    writeZedManagerMixxxState(QStringLiteral("COMPLETE"));
+                    m_zedManagerScanId.clear();
+                    m_zedManagerPurgeMissing = false;
+                    m_zedManagerSyncFolders = false;
+                }
+            });
 }
 
 LibraryControl::~LibraryControl() = default;
+
+void LibraryControl::processZedManagerCommand() {
+    const QString commandPath =
+            zedRuntimeFile(QStringLiteral("zed-manager-command"));
+    const QString processingPath = commandPath + QStringLiteral(".processing");
+
+    if (!QFile::exists(processingPath)) {
+        if (!QFile::exists(commandPath) ||
+                !QFile::rename(commandPath, processingPath)) {
+            return;
+        }
+    }
+
+    QFile commandFile(processingPath);
+    if (!commandFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return;
+    }
+
+    QTextStream stream(&commandFile);
+    if (stream.readLine().trimmed() != QStringLiteral("ZEDMGR1")) {
+        commandFile.close();
+        QFile::remove(processingPath);
+        return;
+    }
+
+    QString commandId;
+    QString action;
+    while (!stream.atEnd()) {
+        const QString line = stream.readLine();
+        const qsizetype separator = line.indexOf(QLatin1Char('\t'));
+        if (separator <= 0) {
+            continue;
+        }
+        const QString key = line.left(separator);
+        const QString value = line.mid(separator + 1).trimmed();
+        if (key == QStringLiteral("ID")) {
+            commandId = value.left(128);
+        } else if (key == QStringLiteral("ACTION")) {
+            action = value;
+        }
+    }
+    commandFile.close();
+    QFile::remove(processingPath);
+
+    const bool purgeMissing =
+            action == QStringLiteral("SCAN_PURGE_MISSING");
+    const bool syncFolders =
+            action == QStringLiteral("SCAN_SYNC_FOLDERS") || purgeMissing;
+    if (commandId.isEmpty() ||
+            (action != QStringLiteral("SCAN") && !syncFolders)) {
+        return;
+    }
+
+    m_zedManagerScanId = commandId;
+    m_zedManagerPurgeMissing = purgeMissing;
+    m_zedManagerSyncFolders = syncFolders;
+    writeZedManagerMixxxState(QStringLiteral("ACCEPTED"));
+    m_pLibrary->trackCollectionManager()->startLibraryScan();
+}
+
+int LibraryControl::purgeZedManagerMissingTracks() {
+    MissingTableModel missingTracks(
+            nullptr, m_pLibrary->trackCollectionManager());
+    missingTracks.select();
+    const int count = missingTracks.rowCount();
+    if (count <= 0) {
+        return 0;
+    }
+    QModelIndexList indices;
+    indices.reserve(count);
+    for (int row = 0; row < count; ++row) {
+        indices.append(missingTracks.index(row, 0));
+    }
+    missingTracks.purgeTracks(indices);
+    return count;
+}
+
+int LibraryControl::syncZedManagerFolders() {
+    static const QString kLibraryRoot =
+            QStringLiteral("/home/pi/Music/ZED Library");
+    static const QString kPlaylistPrefix = QStringLiteral("ZED / ");
+    const QDir root(kLibraryRoot);
+    if (!root.exists()) {
+        return 0;
+    }
+
+    TrackCollection* const pCollection =
+            m_pLibrary->trackCollectionManager()->internalCollection();
+    PlaylistDAO& playlistDao = pCollection->getPlaylistDAO();
+    TrackDAO& trackDao = pCollection->getTrackDAO();
+
+    QHash<QString, int> managedPlaylists;
+    const auto playlists =
+            playlistDao.getPlaylists(PlaylistDAO::PLHT_NOT_HIDDEN);
+    for (const auto& playlist : playlists) {
+        if (playlist.second.startsWith(kPlaylistPrefix)) {
+            managedPlaylists.insert(playlist.second, playlist.first);
+        }
+    }
+
+    QStringList directories{kLibraryRoot};
+    QDirIterator iterator(
+            kLibraryRoot,
+            QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks,
+            QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        directories.append(iterator.next());
+    }
+    directories.sort(Qt::CaseInsensitive);
+
+    QSet<QString> desiredPlaylists;
+    for (const QString& directoryPath : directories) {
+        const QString relative = root.relativeFilePath(directoryPath);
+        QString playlistName(kPlaylistPrefix);
+        if (relative == QStringLiteral(".")) {
+            playlistName += QStringLiteral("Library");
+        } else {
+            playlistName += QString(relative).replace(
+                    QLatin1Char('/'), QStringLiteral(" / "));
+        }
+        desiredPlaylists.insert(playlistName);
+
+        int playlistId = managedPlaylists.value(
+                playlistName, kInvalidPlaylistId);
+        if (playlistId == kInvalidPlaylistId) {
+            playlistId = playlistDao.createPlaylist(playlistName);
+            if (playlistId == kInvalidPlaylistId) {
+                continue;
+            }
+            managedPlaylists.insert(playlistName, playlistId);
+        }
+
+        const int oldTrackCount = playlistDao.getMaxPosition(playlistId);
+        if (oldTrackCount > 0) {
+            QList<int> positions;
+            positions.reserve(oldTrackCount);
+            for (int position = 1; position <= oldTrackCount; ++position) {
+                positions.append(position);
+            }
+            playlistDao.removeTracksFromPlaylist(playlistId, positions);
+        }
+
+        auto trackRefs = trackDao.getAllTrackRefs(QDir(directoryPath));
+        std::sort(trackRefs.begin(), trackRefs.end(),
+                [](const TrackRef& left, const TrackRef& right) {
+                    return left.getLocation().compare(
+                                   right.getLocation(), Qt::CaseInsensitive) < 0;
+                });
+        QList<TrackId> trackIds;
+        QSet<TrackId> seenTrackIds;
+        for (const TrackRef& trackRef : trackRefs) {
+            if (trackRef.hasId() &&
+                    QFileInfo::exists(trackRef.getLocation()) &&
+                    !seenTrackIds.contains(trackRef.getId())) {
+                seenTrackIds.insert(trackRef.getId());
+                trackIds.append(trackRef.getId());
+            }
+        }
+        if (!trackIds.isEmpty()) {
+            playlistDao.appendTracksToPlaylist(trackIds, playlistId);
+        }
+    }
+
+    QStringList obsoletePlaylistIds;
+    for (auto it = managedPlaylists.constBegin();
+            it != managedPlaylists.constEnd(); ++it) {
+        if (!desiredPlaylists.contains(it.key())) {
+            obsoletePlaylistIds.append(QString::number(it.value()));
+        }
+    }
+    if (!obsoletePlaylistIds.isEmpty()) {
+        playlistDao.deletePlaylists(obsoletePlaylistIds);
+    }
+    return desiredPlaylists.size();
+}
+
+void LibraryControl::writeZedManagerMixxxState(const QString& status) {
+    if (m_zedManagerScanId.isEmpty()) {
+        return;
+    }
+    QSaveFile stateFile(
+            zedRuntimeFile(QStringLiteral("zed-manager-mixxx-state")));
+    if (!stateFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return;
+    }
+    QTextStream stream(&stateFile);
+    stream << QStringLiteral("ZEDMGR1\n")
+           << QStringLiteral("ID\t") << m_zedManagerScanId << QLatin1Char('\n')
+           << QStringLiteral("STATUS\t") << status << QLatin1Char('\n')
+           << QStringLiteral("TIME\t")
+           << QDateTime::currentDateTimeUtc().toString(Qt::ISODate)
+           << QLatin1Char('\n');
+    stateFile.commit();
+}
 
 void LibraryControl::maybeCreateGroupController(const QString& group) {
     if (m_loadToGroupControllers.find(group) == m_loadToGroupControllers.end()) {
@@ -1023,8 +1340,13 @@ void LibraryControl::writeD2BrowseState() {
     const int trackCount = pTrackTableView ? pTrackTableView->getBrowseRowCount() : 0;
     const int sidebarRow = m_pSidebarWidget->d2SelectedVisibleRow();
     const int sidebarCount = m_pSidebarWidget->d2VisibleRowCount();
+    // A DJ folder may contain both subfolders and playable tracks. Treat it as
+    // enterable whenever its current TrackModel has rows, so a Browse press
+    // moves to the player-style track list instead of remaining in the tree.
     m_pD2SidebarIsLeaf->setAndConfirm(
-            m_pSidebarWidget->isLeafNodeSelected() ? 1.0 : 0.0);
+            (m_pSidebarWidget->isLeafNodeSelected() || trackCount > 0)
+                    ? 1.0
+                    : 0.0);
     const int trackWindowStart = std::min(
             std::max(0, trackRow - 4), std::max(0, trackCount - 9));
     const int sidebarWindowStart = std::min(

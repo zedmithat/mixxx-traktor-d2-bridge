@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <rect width="1280" height="800" fill="#020406"/>
+  <svg x="474" y="318" width="108" height="132" viewBox="0 0 68 80">
+    <defs>
+      <linearGradient id="handoffZ" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#ff8b61"/>
+        <stop offset="1" stop-color="#ec4542"/>
+      </linearGradient>
+    </defs>
+    <path d="M346 0 L346 717 L3552 3187 L346 3187 L346 3712 L4128 3712 L4128 2995 L922 525 L4128 525 L4128 0 Z"
+          transform="translate(2 78) scale(.015625 -.015625)"
+          fill="none" stroke="#ec4542" stroke-opacity=".28" stroke-width="70"/>
+    <path d="M346 0 L346 717 L3552 3187 L346 3187 L346 3712 L4128 3712 L4128 2995 L922 525 L4128 525 L4128 0 Z"
+          transform="translate(2 78) scale(.015625 -.015625)" fill="url(#handoffZ)"/>
+  </svg>
+  <svg x="586" y="318" width="108" height="132" viewBox="0 0 68 80">
+    <defs>
+      <linearGradient id="handoffE" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff"/>
+        <stop offset="1" stop-color="#bac8d2"/>
+      </linearGradient>
+    </defs>
+    <path d="M1101 0 Q890 0 714 105 Q538 211 432 387 Q326 563 326 774 L326 2938 Q326 3149 432 3325 Q538 3501 714 3606 Q890 3712 1101 3712 L3328 3712 Q3546 3712 3722 3606 Q3898 3501 4003 3325 Q4109 3149 4109 2938 L4109 1594 L851 1594 L851 774 Q851 672 924 598 Q998 525 1101 525 L4109 525 L4109 0 Z M851 2118 L3578 2118 L3578 2938 Q3578 3040 3504 3113 Q3430 3187 3328 3187 L1101 3187 Q998 3187 924 3113 Q851 3040 851 2938 Z"
+          transform="translate(2 78) scale(.015625 -.015625)"
+          fill="none" stroke="#dce8ef" stroke-opacity=".25" stroke-width="70"/>
+    <path d="M1101 0 Q890 0 714 105 Q538 211 432 387 Q326 563 326 774 L326 2938 Q326 3149 432 3325 Q538 3501 714 3606 Q890 3712 1101 3712 L3328 3712 Q3546 3712 3722 3606 Q3898 3501 4003 3325 Q4109 3149 4109 2938 L4109 1594 L851 1594 L851 774 Q851 672 924 598 Q998 525 1101 525 L4109 525 L4109 0 Z M851 2118 L3578 2118 L3578 2938 Q3578 3040 3504 3113 Q3430 3187 3328 3187 L1101 3187 Q998 3187 924 3113 Q851 3040 851 2938 Z"
+          transform="translate(2 78) scale(.015625 -.015625)" fill="url(#handoffE)"/>
+  </svg>
+  <svg x="698" y="318" width="108" height="132" viewBox="0 0 68 80">
+    <defs>
+      <linearGradient id="handoffD" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#42e5ff"/>
+        <stop offset="1" stop-color="#1c8fea"/>
+      </linearGradient>
+    </defs>
+    <path d="M928 0 Q710 0 534 105 Q358 211 252 387 Q147 563 147 774 L147 2938 Q147 3149 252 3325 Q358 3501 534 3606 Q710 3712 928 3712 L3405 3712 L3405 4928 L3930 4928 L3930 0 Z M928 525 L3155 525 Q3258 525 3331 598 Q3405 672 3405 774 L3405 2938 Q3405 3040 3331 3113 Q3258 3187 3155 3187 L928 3187 Q826 3187 752 3113 Q678 3040 678 2938 L678 774 Q678 672 752 598 Q826 525 928 525 Z"
+          transform="translate(2 78) scale(.015625 -.015625)"
+          fill="none" stroke="#23bce8" stroke-opacity=".28" stroke-width="70"/>
+    <path d="M928 0 Q710 0 534 105 Q358 211 252 387 Q147 563 147 774 L147 2938 Q147 3149 252 3325 Q358 3501 534 3606 Q710 3712 928 3712 L3405 3712 L3405 4928 L3930 4928 L3930 0 Z M928 525 L3155 525 Q3258 525 3331 598 Q3405 672 3405 774 L3405 2938 Q3405 3040 3331 3113 Q3258 3187 3155 3187 L928 3187 Q826 3187 752 3113 Q678 3040 678 2938 L678 774 Q678 672 752 598 Q826 525 928 525 Z"
+          transform="translate(2 78) scale(.015625 -.015625)" fill="url(#handoffD)"/>
+  </svg>
+  <text x="640" y="490" text-anchor="middle" fill="#74838c"
+        font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="600"
+        letter-spacing="4">OPEN DJ SYSTEM</text>
+  <text x="640" y="551" text-anchor="middle" fill="#edf4f7"
+        font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="700"
+        letter-spacing="2">BUILT FOR DJS.</text>
+  <text x="640" y="588" text-anchor="middle" fill="#35d8f2"
+        font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="700"
+        letter-spacing="2">NOT SHAREHOLDERS.</text>
+  <rect x="476" y="620" width="328" height="3" fill="#35d8f2"/>
+</svg>

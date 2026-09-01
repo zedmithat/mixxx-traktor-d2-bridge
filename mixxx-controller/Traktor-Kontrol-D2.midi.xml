@@ -123,6 +123,8 @@
 
       <control><group>[Channel1]</group><key>D2.captureButton</key><description>P1 AutoDJ Add</description><status>0x90</status><midino>0x40</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.captureButton</key><description>P2 AutoDJ Add</description><status>0x91</status><midino>0x40</midino><options><script-binding/></options></control>
+      <control><group>[Channel1]</group><key>D2.usbOpenButton</key><description>P1 Open Mounted USB in Browser</description><status>0x90</status><midino>0x65</midino><options><script-binding/></options></control>
+      <control><group>[Channel2]</group><key>D2.usbOpenButton</key><description>P2 Open Mounted USB in Browser</description><status>0x91</status><midino>0x65</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.editButton</key><description>P1 Beatgrid Edit</description><status>0x90</status><midino>0x41</midino><options><script-binding/></options></control>
       <control><group>[Channel2]</group><key>D2.editButton</key><description>P2 Beatgrid Edit</description><status>0x91</status><midino>0x41</midino><options><script-binding/></options></control>
       <control><group>[Channel1]</group><key>D2.screenEncoder</key><description>P1 Screen Encoder 1</description><status>0xB0</status><midino>0x10</midino><options><script-binding/></options></control>

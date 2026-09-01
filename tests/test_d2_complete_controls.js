@@ -865,9 +865,14 @@ for (var loadChannel = 0; loadChannel < 2; ++loadChannel) {
         return controlHasTag(block, "status", loadStatus) &&
             controlHasTag(block, "midino", "0x65");
     });
-    assert(note101Bindings.length === 0,
-        "Dead Browse Note 101 binding must not remain on MIDI channel " +
+    assert(note101Bindings.length === 1,
+        "Browse CAPTURE Note 101 must have exactly one binding on MIDI channel " +
         (loadChannel + 1));
+    assert(controlHasTag(note101Bindings[0], "group", loadGroup) &&
+           controlHasTag(note101Bindings[0], "key", "D2.usbOpenButton") &&
+           note101Bindings[0].indexOf("<script-binding/>") >= 0,
+        "Browse CAPTURE Note 101 does not own the native USB action on MIDI " +
+        "channel " + (loadChannel + 1));
 }
 
 [
@@ -887,7 +892,8 @@ for (var loadChannel = 0; loadChannel < 2; ++loadChannel) {
 
 /* libctlra emits ordinary D2 buttons as note 36 + hardware ID, except CUE
  * and PLAY which deliberately use dedicated CCs for reliable release events.
- * Browse press/touch use the bridge's 62/100 messages. */
+ * Browse press/touch and context-sensitive CAPTURE use the bridge's
+ * 62/100/101 messages. */
 function hasMidi(status, midiNumber) {
     var statusText = "<status>0x" + status.toString(16).toUpperCase() + "</status>";
     var midiText = "<midino>0x" + midiNumber.toString(16).toUpperCase() + "</midino>";
@@ -906,6 +912,7 @@ for (var midiChannel = 0; midiChannel < 2; midiChannel++) {
         assert(hasMidi(noteStatus, note), "XML missing note " + note + " on channel " + (midiChannel + 1));
     }
     assert(hasMidi(noteStatus, 100), "XML missing Browse touch on channel " + (midiChannel + 1));
+    assert(hasMidi(noteStatus, 101), "XML missing Browse USB action on channel " + (midiChannel + 1));
     var ccStatus = 0xB0 + midiChannel;
     for (var cc = 16; cc <= 21; cc++)
         assert(hasMidi(ccStatus, cc), "XML missing encoder CC " + cc + " on channel " + (midiChannel + 1));

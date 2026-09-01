@@ -115,3 +115,27 @@ green before the next item starts.
     clean, generated files are ignored, a fresh Pi native build/test passes,
     and the complete desktop JS/Python regression suite passes. The README
     contains the accepted player skin and D2 screen gallery.
+
+12. Add an authenticated LAN library manager that keeps file I/O away from
+    Mixxx's audio and D2 USB threads.
+
+    The manager now supports restricted folder creation, multi-file picker and
+    drag-and-drop uploads, atomic conflict-safe writes, confirmed deletion,
+    free-space reporting and one native Mixxx scan per completed batch. It does
+    not copy or scan merely because the Pi starts.
+
+13. Remove stale offline library entries without deleting existing audio.
+
+    The explicit web action first runs the native scanner and then passes only
+    `fs_deleted=1` rows through `TrackCollectionManager::purgeTracks()`, which
+    consistently clears playlist, crate, cue and analysis references. A safe
+    SQLite backup was taken before hardware acceptance.
+
+14. Mirror the physical `ZED Library` hierarchy into controller-visible Mixxx
+    playlists.
+
+    Native `PlaylistDAO` synchronization owns only the `ZED / ...` namespace,
+    keeps unrelated user playlists intact, updates contents after explicit web
+    or USB imports and removes obsolete managed playlists when their directory
+    disappears. The desktop skin and both D2 browsers consume the same native
+    sidebar entries.

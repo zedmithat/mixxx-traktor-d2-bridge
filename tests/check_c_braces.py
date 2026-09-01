@@ -1,6 +1,8 @@
 import pathlib
 
-source = pathlib.Path(__file__).with_name("d2_bridge.c").read_text()
+source = (pathlib.Path(__file__).resolve().parents[1] / "bridge" / "d2_bridge.c").read_text(
+    encoding="utf-8"
+)
 stack = []
 line = 1
 i = 0

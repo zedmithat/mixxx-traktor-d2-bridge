@@ -1,0 +1,15 @@
+[Unit]
+Description=Mixxx Zed D2 standalone session
+After=d2-bridge.service sway-session.service
+Wants=d2-bridge.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/bin/start-mixxx-d2.sh
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=8
+
+[Install]
+WantedBy=default.target

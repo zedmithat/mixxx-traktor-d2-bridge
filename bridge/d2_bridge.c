@@ -50,9 +50,9 @@ static _Thread_local int d2_ft_ready = 0;
 /* Every HUD glyph is cached once in its native alpha mask.  The live 60 Hz
  * path therefore only alpha-blends pixels; it never asks FreeType to rasterize
  * the same digits and labels on every frame. */
-#define D2_FONT_SIZES 3
+#define D2_FONT_SIZES 4
 #define D2_FONT_CACHE_GLYPHS 128
-#define D2_FONT_CACHE_SIDE 48
+#define D2_FONT_CACHE_SIDE 64
 struct d2_cached_glyph {
     unsigned char bitmap[D2_FONT_CACHE_SIDE * D2_FONT_CACHE_SIDE];
     int width;
@@ -110,6 +110,7 @@ struct d2_screen_state {
     int browse_sort_order;  /* 0 = ascending, 1 = descending */
     int smart_menu;
     int smart_index;
+    int mixxx_ready;
     float hotcue_position[8];
     uint32_t hotcue_color[8];
     int playing;
@@ -136,6 +137,7 @@ static struct d2_screen_state d2_screen_state[D2_ASSET_SLOTS] = {
 /* Individual FX touch masks are transient; 0x0f is the deliberate persistent
  * FX Settings view opened by FX SELECT and closes on the next press. */
 static uint64_t d2_fx_touch_updated_us[3] = {0, 0, 0};
+static uint64_t d2_bridge_started_us = 0;
 
 struct d2_led_state {
     int outputs_enabled;
@@ -414,6 +416,21 @@ static struct d2_library_browse_state d2_library_browse = {
     .sidebar_row = 0,
     .sidebar_count = 0,
 };
+
+/* The USB monitor publishes mount metadata only. It never walks the media or
+ * competes with Mixxx's native BrowseFeature scanner. Keeping this state tiny
+ * lets the D2 header/LED react to hotplug without adding load to the audio or
+ * HID input paths. */
+struct d2_usb_source_state {
+    int present;
+    int count;
+    char label[48];
+    char mount[256];
+    struct timespec file_mtime;
+    int ready;
+};
+
+static struct d2_usb_source_state d2_usb_source = {0};
 static uint8_t d2_button_state[3][58];
 
 enum d2_screen_view {
@@ -1865,6 +1882,7 @@ static void d2_parse_sysex(const unsigned char *data, uint32_t len)
                key[6] >= '0' && key[6] <= '8' && key[7] == '\0') {
         d2_load_browse_metadata(key[6] - '0', atoi(value));
     } else if (strcmp(key, "VIEW") == 0) {
+        d2_screen_state[deck].mixxx_ready = 1;
         d2_browse_mark_dirty();
         if (strcmp(value, "DECK") == 0) {
             d2_screen_view[deck] = D2_VIEW_DECK;
@@ -2100,7 +2118,7 @@ static void d2_font_shutdown(void)
 
 static int d2_font_pixel_size(int scale)
 {
-    return scale == 1 ? 9 : (scale == 2 ? 14 : 21);
+    return scale == 1 ? 9 : (scale == 2 ? 14 : (scale == 3 ? 21 : 54));
 }
 
 /* Materialize the complete, coloured waveform once at track-load time.
@@ -2698,6 +2716,57 @@ static int d2_load_library_browse_state(void)
     return 1;
 }
 
+static int d2_load_usb_source_state(void)
+{
+    const char *path = "/run/user/1000/zed-usb-state";
+    struct stat st;
+    FILE *file;
+    char line[320];
+    struct d2_usb_source_state next = {0};
+
+    if (stat(path, &st) != 0) {
+        if (!d2_usb_source.ready || !d2_usb_source.present)
+            return 0;
+        d2_usb_source.present = 0;
+        d2_usb_source.count = 0;
+        d2_usb_source.label[0] = '\0';
+        d2_usb_source.mount[0] = '\0';
+        return 1;
+    }
+    if (d2_usb_source.ready &&
+        st.st_mtim.tv_sec == d2_usb_source.file_mtime.tv_sec &&
+        st.st_mtim.tv_nsec == d2_usb_source.file_mtime.tv_nsec)
+        return 0;
+    file = fopen(path, "r");
+    if (!file)
+        return 0;
+    while (fgets(line, sizeof(line), file)) {
+        char *tab = strchr(line, '\t');
+        d2_trim_line(line);
+        if (!tab)
+            continue;
+        *tab++ = '\0';
+        if (strcmp(line, "PRESENT") == 0) {
+            next.present = atoi(tab) > 0;
+        } else if (strcmp(line, "COUNT") == 0) {
+            next.count = atoi(tab);
+        } else if (strcmp(line, "LABEL") == 0) {
+            snprintf(next.label, sizeof(next.label), "%s", tab);
+        } else if (strcmp(line, "MOUNT") == 0) {
+            snprintf(next.mount, sizeof(next.mount), "%s", tab);
+        }
+    }
+    fclose(file);
+    next.file_mtime = st.st_mtim;
+    next.ready = 1;
+    if (!next.present) {
+        next.label[0] = '\0';
+        next.mount[0] = '\0';
+    }
+    d2_usb_source = next;
+    return 1;
+}
+
 static void d2_render_smart_lists(uint8_t *pixels, int player,
                                   const struct d2_screen_state *state)
 {
@@ -2787,6 +2856,7 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     const int accent_b = player == 1 ? 66 : 234;
     char context[45];
     char sort_label[18];
+    char usb_label[18];
 
     snprintf(context, sizeof(context), "%.31s",
              d2_library_browse.context[0] ?
@@ -2802,6 +2872,9 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     }
     snprintf(sort_label, sizeof(sort_label), "%s %s", sort_name,
              state && state->browse_sort_order ? "DESC" : "ASC");
+    snprintf(usb_label, sizeof(usb_label), "USB:%.11s",
+             d2_usb_source.present && d2_usb_source.label[0] ?
+             d2_usb_source.label : "NONE");
 
     d2_fill_rect(pixels, 0, 0, WIDTH, HEIGHT, 3, 5, 7);
     d2_fill_rect(pixels, 0, 0, WIDTH, 26, 25, 29, 34);
@@ -2810,6 +2883,10 @@ static void d2_render_browse_fast(uint8_t *pixels, int player,
     d2_draw_text(pixels, sidebar_open ? "LIBRARY >" : "TRACKS >",
                  54, 5, 1, 205, 213, 220);
     d2_draw_text(pixels, context, 106, 5, 1, 76, 218, 235);
+    d2_draw_text(pixels, usb_label, 299, 5, 1,
+                 d2_usb_source.present ? 76 : 112,
+                 d2_usb_source.present ? 218 : 118,
+                 d2_usb_source.present ? 235 : 124);
     d2_draw_text(pixels, sort_label, 374, 5, 1, 224, 229, 116);
     d2_draw_text(pixels, player == 1 ? "A" : "B", 469, 5, 1,
                  accent_r, accent_g, accent_b);
@@ -2957,6 +3034,50 @@ static int d2_fx_unit_for_player(int player)
 static const char *d2_fx_unit_label(int player)
 {
     return d2_fx_unit_for_player(player) == 2 ? "FX UNIT 2" : "FX UNIT 1";
+}
+
+static void d2_render_startup_fast(uint8_t *pixels, int player,
+                                   uint64_t elapsed_us)
+{
+    const int reveal_z = elapsed_us >= 80000ULL;
+    const int reveal_e = elapsed_us >= 240000ULL;
+    const int reveal_d = elapsed_us >= 400000ULL;
+    int progress_width = (int)(elapsed_us * 344ULL / 2200000ULL);
+    if (progress_width < 4)
+        progress_width = 4;
+    if (progress_width > 344)
+        progress_width = 344;
+
+    d2_fill_rect(pixels, 0, 0, WIDTH, HEIGHT, 2, 4, 6);
+    d2_draw_text(pixels, "z", 168, 59, 4,
+                 reveal_z ? 236 : 35, reveal_z ? 69 : 25,
+                 reveal_z ? 66 : 28);
+    d2_draw_text(pixels, "e", 224, 59, 4,
+                 reveal_e ? 238 : 35, reveal_e ? 244 : 35,
+                 reveal_e ? 248 : 38);
+    d2_draw_text(pixels, "d", 280, 59, 4,
+                 reveal_d ? 53 : 25, reveal_d ? 216 : 34,
+                 reveal_d ? 242 : 38);
+
+    d2_draw_text_centered(pixels, "OPEN DJ SYSTEM",
+                          WIDTH / 2, 137, 1, 105, 122, 132);
+    d2_draw_text_centered(pixels, "BUILT FOR DJS.",
+                          WIDTH / 2, 163, 1, 238, 244, 248);
+    d2_draw_text_centered(pixels, "NOT SHAREHOLDERS.",
+                          WIDTH / 2, 179, 1, 53, 216, 242);
+    d2_fill_rect(pixels, 68, 207, 344, 4, 14, 22, 27);
+    d2_fill_rect(pixels, 68, 207, progress_width, 4, 53, 216, 242);
+    d2_draw_text_centered(pixels,
+                 elapsed_us < 650000ULL ? "INITIALIZING D2 BRIDGE" :
+                 "WAITING FOR MIXXX",
+                 WIDTH / 2, 220, 1,
+                 151, 168, 178);
+
+    d2_draw_text_centered(pixels, player == 1 ? "DECK A" : "DECK B",
+                 WIDTH / 2, 247, 1,
+                 player == 1 ? 236 : 53,
+                 player == 1 ? 69 : 216,
+                 player == 1 ? 66 : 242);
 }
 
 static void d2_render_deck_fast(uint8_t *pixels, int player,
@@ -3372,12 +3493,21 @@ static void *d2_render_thread_main(void *userdata)
                 d2_visible_deck_title(deck_title, sizeof(deck_title),
                                       state->title);
 
-                int accent_r = player == 1 ? 220 : 40;
-                int accent_g = player == 1 ? 40 : 120;
-                int accent_b = player == 1 ? 40 : 230;
-                d2_render_deck_fast(d2_render_buffer[player][back], player,
-                                    state, displayed_position, deck_title,
-                                    accent_r, accent_g, accent_b);
+                if (!state->mixxx_ready) {
+                    uint64_t now_us = d2_monotonic_us();
+                    uint64_t elapsed_us = now_us > d2_bridge_started_us ?
+                        now_us - d2_bridge_started_us : 0;
+                    d2_render_startup_fast(
+                        d2_render_buffer[player][back], player, elapsed_us);
+                } else {
+                    int accent_r = player == 1 ? 220 : 40;
+                    int accent_g = player == 1 ? 40 : 120;
+                    int accent_b = player == 1 ? 40 : 230;
+                    d2_render_deck_fast(
+                        d2_render_buffer[player][back], player,
+                        state, displayed_position, deck_title,
+                        accent_r, accent_g, accent_b);
+                }
 
                 pthread_mutex_lock(&d2_frame_mutex);
                 d2_render_buffer_index[player] = back;
@@ -3480,7 +3610,9 @@ static int32_t screen_callback(
         uint64_t browse_now_us = d2_monotonic_us();
         enum d2_browse_notice_kind browse_notice =
             d2_active_browse_notice(player, browse_now_us);
-        if (d2_load_library_browse_state())
+        int browse_state_changed = d2_load_library_browse_state();
+        browse_state_changed |= d2_load_usb_source_state();
+        if (browse_state_changed)
             d2_browse_mark_dirty();
         if (d2_browse_frame_is_current(player))
             return 0;
@@ -3711,6 +3843,18 @@ static void event_callback_locked(
                           e->button.pressed ? 127 : 0);
                 D2_EVENT_LOG("BROWSE BACK PLAYER %d -> LIBRARY FOCUS %s\\n",
                              player, e->button.pressed ? "ON" : "OFF");
+
+            } else if (e->button.id == 28 &&
+                       d2_screen_view[player] == D2_VIEW_BROWSE) {
+
+                /* CAPTURE remains AutoDJ in Deck view. In Browse it gets a
+                 * dedicated note so Mixxx can open the mounted USB source
+                 * without changing the existing controller contract. */
+                midi_note(midi_channel, 101,
+                          e->button.pressed ? 127 : 0);
+                D2_EVENT_LOG("USB OPEN PLAYER %d CH %d NOTE 101 %s\\n",
+                             player, midi_channel + 1,
+                             e->button.pressed ? "ON" : "OFF");
 
             } else if (e->button.id == 56) {
 
@@ -3956,7 +4100,9 @@ static void feedback_callback(
 
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_BACK,
                         d2_screen_view[player] == D2_VIEW_BROWSE ? bright : dim);
-    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_CAPTURE, dim);
+    ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_CAPTURE,
+                        d2_screen_view[player] == D2_VIEW_BROWSE &&
+                        d2_usb_source.present ? bright : dim);
     ctlra_dev_light_set(dev, NI_KONTROL_D2_LED_EDIT,
                         screen->beatgrid_edit ? bright : dim);
     for (int strip = 0; strip < 4; ++strip)
@@ -4134,6 +4280,17 @@ static int d2_render_test_image(const char *path, int use_beatmap)
     d2_bind_asset_slot(1, NULL);
     free(assets);
     return 0;
+}
+
+static int d2_render_startup_test_image(const char *path)
+{
+    uint8_t *pixels = calloc((size_t)WIDTH * HEIGHT * 2, 1);
+    if (!pixels)
+        return 1;
+    d2_render_startup_fast(pixels, 1, 1800000ULL);
+    int result = d2_write_rgb565_ppm(path, pixels) == 0 ? 0 : 1;
+    free(pixels);
+    return result;
 }
 
 static int d2_render_browse_test_image(const char *path, int browse_focus,
@@ -5284,6 +5441,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, stop_handler);
     signal(SIGUSR1, capture_handler);
     d2_font_init();
+    d2_bridge_started_us = d2_monotonic_us();
     if (!d2_ft_ready)
         fprintf(stderr, "D2 font: FreeType unavailable; using bitmap fallback\n");
     if (argc == 3 && strcmp(argv[1], "--render-test") == 0) {
@@ -5311,6 +5469,11 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--render-smart-lists-test") == 0) {
         int result = d2_render_browse_test_image(
             argv[2], 2, D2_BROWSE_NOTICE_NONE);
+        d2_font_shutdown();
+        return result;
+    }
+    if (argc == 3 && strcmp(argv[1], "--render-startup-test") == 0) {
+        int result = d2_render_startup_test_image(argv[2]);
         d2_font_shutdown();
         return result;
     }

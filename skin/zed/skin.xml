@@ -28,6 +28,7 @@
 	<LaunchImageStyle>
 	  LaunchImage {
 		background-color:#020406;
+		border-image: url(skin:/images/zed_boot_handoff.svg) 0 0 0 0 stretch stretch;
 		}
 	  QLabel {
 	    image: none;
@@ -37,22 +38,22 @@
 		background:transparent;
 	  }
 	  QLabel#zedLaunchLetterZ {
-	    image: url(skin:/images/zed_launch_z.svg);
+	    image: none;
 		min-width:108px; max-width:108px;
 		min-height:132px; max-height:132px;
 	  }
 	  QLabel#zedLaunchLetterE {
-	    image: url(skin:/images/zed_launch_e.svg);
+	    image: none;
 		min-width:108px; max-width:108px;
 		min-height:132px; max-height:132px;
 	  }
 	  QLabel#zedLaunchLetterD {
-	    image: url(skin:/images/zed_launch_d.svg);
+	    image: none;
 		min-width:108px; max-width:108px;
 		min-height:132px; max-height:132px;
 	  }
 		QProgressBar {
-	    background-color: #10161b;
+	    background-color: transparent;
 		border:none;
 		padding:0;
 		margin-top:8px;
@@ -64,7 +65,7 @@
 	  }
 
 	  QProgressBar::chunk {
-	    background-color: #35d8f2;
+	    background-color: transparent;
 	  }
 	</LaunchImageStyle>
 

@@ -13,6 +13,12 @@ SOURCE = (ROOT / "mixxx-source-patches" / "launchimage.cpp").read_text(
 SKIN_XML = (SKIN / "skin.xml").read_text(encoding="utf-8")
 
 ET.parse(SKIN / "skin.xml")
+ET.parse(SKIN / "images" / "zed_boot_handoff.svg")
+assert "zed_boot_handoff.svg" in SKIN_XML
+assert "border-image:" in SKIN_XML
+handoff = (SKIN / "images" / "zed_boot_handoff.svg").read_text(encoding="utf-8")
+assert "<image " not in handoff, "handoff SVG must not depend on external images"
+assert all(marker in handoff for marker in ("handoffZ", "handoffE", "handoffD"))
 
 for letter in "zed":
     asset = SKIN / "images" / f"zed_launch_{letter}.svg"

@@ -69,6 +69,13 @@ test-js:
 	$(PYTHON) ../tests/test_time_display_modes.py
 	$(PYTHON) ../tests/test_zed_launch_animation.py
 	$(PYTHON) ../tests/test_d2_smart_playlist_source.py
+	$(PYTHON) ../tests/test_zed_boot_splash.py
+	$(PYTHON) ../tests/test_zed_usb_monitor.py
+	$(PYTHON) ../tests/test_zed_manager.py
+	$(PYTHON) ../tests/test_zed_folder_playlists.py
+	$(PYTHON) ../tests/test_d2_usb_source.py
+	$(PYTHON) ../tests/test_d2_usb_player_source.py
+	$(PYTHON) ../tests/check_c_braces.py
 
 clean:
 	rm -f $(OUTPUT_DIR)/d2_bridge_metadata \

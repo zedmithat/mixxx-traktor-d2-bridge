@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <rect width="1280" height="800" fill="#020406"/>
+  <image href="zed_z.svg" x="474" y="318" width="108" height="132"/>
+  <image href="zed_e.svg" x="586" y="318" width="108" height="132"/>
+  <image href="zed_d.svg" x="698" y="318" width="108" height="132"/>
+  <text x="640" y="490" text-anchor="middle" fill="#74838c"
+        font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="600"
+        letter-spacing="4">OPEN DJ SYSTEM</text>
+  <text x="640" y="551" text-anchor="middle" fill="#edf4f7"
+        font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="700"
+        letter-spacing="2">BUILT FOR DJS.</text>
+  <text x="640" y="588" text-anchor="middle" fill="#35d8f2"
+        font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="700"
+        letter-spacing="2">NOT SHAREHOLDERS.</text>
+  <rect x="476" y="620" width="328" height="3" fill="#10161b"/>
+  <rect x="476" y="620" width="328" height="3" fill="#35d8f2"/>
+</svg>

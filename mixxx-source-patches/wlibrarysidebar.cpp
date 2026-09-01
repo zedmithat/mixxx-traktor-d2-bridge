@@ -491,6 +491,60 @@ bool WLibrarySidebar::d2ActivateVisibleLabel(const QString& label) {
     return false;
 }
 
+bool WLibrarySidebar::d2OpenRemovableDevice(const QString& label) {
+    if (!model() || label.isEmpty()) {
+        return false;
+    }
+
+    QModelIndex computer;
+    for (int row = 0; row < model()->rowCount(QModelIndex()); ++row) {
+        const QModelIndex candidate = model()->index(row, 0, QModelIndex());
+        if (candidate.data(Qt::DisplayRole).toString().compare(
+                    QStringLiteral("Computer"), Qt::CaseInsensitive) == 0) {
+            computer = candidate;
+            break;
+        }
+    }
+    if (!computer.isValid()) {
+        return false;
+    }
+
+    // Expanding the native Computer branches asks BrowseFeature to enumerate
+    // /media/$USER and /run/media/$USER. No directory walk is performed here;
+    // Mixxx remains the sole owner of filesystem browsing and track models.
+    expand(computer);
+    for (int row = 0; row < model()->rowCount(computer); ++row) {
+        const QModelIndex branch = model()->index(row, 0, computer);
+        expand(branch);
+    }
+
+    QModelIndex index = model()->index(0, 0, computer);
+    while (index.isValid()) {
+        if (index.data(Qt::DisplayRole).toString().compare(
+                    label, Qt::CaseInsensitive) == 0) {
+            selectIndex(index);
+            emit clicked(index);
+            return true;
+        }
+        index = indexBelow(index);
+        if (index.isValid()) {
+            QModelIndex ancestor = index.parent();
+            bool belowComputer = false;
+            while (ancestor.isValid()) {
+                if (ancestor == computer) {
+                    belowComputer = true;
+                    break;
+                }
+                ancestor = ancestor.parent();
+            }
+            if (!belowComputer) {
+                break;
+            }
+        }
+    }
+    return false;
+}
+
 /// Refocus the selected item after right-click
 void WLibrarySidebar::focusSelectedIndex() {
     // After the context menu was activated (and closed, with or without clicking

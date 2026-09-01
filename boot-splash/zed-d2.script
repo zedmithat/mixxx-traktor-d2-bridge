@@ -1,0 +1,86 @@
+Window.SetBackgroundTopColor(0.008, 0.016, 0.024);
+Window.SetBackgroundBottomColor(0.008, 0.016, 0.024);
+
+zed_z_image = Image("zed_z.png");
+zed_e_image = Image("zed_e.png");
+zed_d_image = Image("zed_d.png");
+progress_bg_image = Image("progress_bg.png");
+progress_fill_image = Image("progress_fill.png");
+boot_copy_image = Image("zed-boot-copy.png");
+
+zed_z_sprite = Sprite(zed_z_image);
+zed_e_sprite = Sprite(zed_e_image);
+zed_d_sprite = Sprite(zed_d_image);
+progress_bg_sprite = Sprite(progress_bg_image);
+progress_fill_sprite = Sprite(progress_fill_image);
+boot_copy_sprite = Sprite(boot_copy_image);
+
+logo_y = Window.GetHeight() / 2 - 82;
+zed_z_sprite.SetX(Window.GetWidth() / 2 - 166);
+zed_e_sprite.SetX(Window.GetWidth() / 2 - 54);
+zed_d_sprite.SetX(Window.GetWidth() / 2 + 58);
+zed_z_sprite.SetY(logo_y);
+zed_e_sprite.SetY(logo_y);
+zed_d_sprite.SetY(logo_y);
+
+progress_bg_sprite.SetX(Window.GetWidth() / 2 - 164);
+progress_bg_sprite.SetY(Window.GetHeight() / 2 + 220);
+progress_fill_sprite.SetX(Window.GetWidth() / 2 - 164);
+progress_fill_sprite.SetY(Window.GetHeight() / 2 + 220);
+boot_copy_sprite.SetX(Window.GetWidth() / 2 - 260);
+boot_copy_sprite.SetY(Window.GetHeight() / 2 + 72);
+
+zed_z_sprite.SetOpacity(0.0);
+zed_e_sprite.SetOpacity(0.0);
+zed_d_sprite.SetOpacity(0.0);
+progress_bg_sprite.SetOpacity(0.0);
+progress_fill_sprite.SetOpacity(0.0);
+boot_copy_sprite.SetOpacity(0.0);
+
+frame = 0;
+boot_progress = 0.02;
+
+fun zed_reveal(frame_value, start_frame) {
+    amount = (frame_value - start_frame) / 18.0;
+    if (amount < 0.0) amount = 0.0;
+    if (amount > 1.0) amount = 1.0;
+    return amount;
+}
+
+fun refresh_callback() {
+    frame++;
+    zed_z_sprite.SetOpacity(zed_reveal(frame, 1));
+    zed_e_sprite.SetOpacity(zed_reveal(frame, 9));
+    zed_d_sprite.SetOpacity(zed_reveal(frame, 17));
+    boot_copy_sprite.SetOpacity(zed_reveal(frame, 24));
+
+    if (frame > 38) {
+        progress_bg_sprite.SetOpacity(1.0);
+        progress_fill_sprite.SetOpacity(1.0);
+    }
+
+    width = boot_progress * 328.0;
+    if (width < 1.0) width = 1.0;
+    if (width > 328.0) width = 328.0;
+    progress_fill_sprite.SetImage(progress_fill_image.Scale(width, 3));
+}
+
+fun boot_progress_callback(duration, progress) {
+    boot_progress = progress;
+    if (boot_progress < 0.02) boot_progress = 0.02;
+    if (boot_progress > 1.0) boot_progress = 1.0;
+}
+
+fun quit_callback() {
+    zed_z_sprite.SetOpacity(1.0);
+    zed_e_sprite.SetOpacity(1.0);
+    zed_d_sprite.SetOpacity(1.0);
+    boot_copy_sprite.SetOpacity(1.0);
+    progress_bg_sprite.SetOpacity(1.0);
+    progress_fill_sprite.SetOpacity(1.0);
+    progress_fill_sprite.SetImage(progress_fill_image.Scale(328, 3));
+}
+
+Plymouth.SetRefreshFunction(refresh_callback);
+Plymouth.SetBootProgressFunction(boot_progress_callback);
+Plymouth.SetQuitFunction(quit_callback);

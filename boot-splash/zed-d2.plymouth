@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Zed D2 Standalone
+Description=Seamless Zed startup for the Mixxx Traktor D2 performance system
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/zed-d2
+ScriptFile=/usr/share/plymouth/themes/zed-d2/zed-d2.script
