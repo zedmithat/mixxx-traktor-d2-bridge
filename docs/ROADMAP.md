@@ -139,3 +139,28 @@ green before the next item starts.
     or USB imports and removes obsolete managed playlists when their directory
     disappears. The desktop skin and both D2 browsers consume the same native
     sidebar entries.
+
+15. Harden the authenticated LAN library manager and USB media monitor without
+    blocking their native Mixxx command path.
+
+    The user service now has an empty capability set, private devices and
+    temporary files, read-only system/home views, restricted namespaces,
+    address families and dangerous system-call groups, and a `0077` umask.
+    Live authentication, library/status access and removable-media publication
+    pass with systemd exposure scores of `2.2 OK` and `1.9 OK` respectively.
+
+16. Prevent Hot Cue callback storms from overflowing PortMidi during a track
+    attach or analysis refresh.
+
+    Position and colour callbacks are coalesced into one ordered 40 ms marker
+    snapshot per D2. Track identity and transport state drain first; marker
+    values use the normal state cache so repeated callbacks cannot retransmit
+    unchanged rows. The regression suite proves that sixteen callbacks emit
+    one snapshot instead of sixteen complete eight-cue sets.
+
+17. Make a clean GCC 14 Raspberry Pi Mixxx build reproducible.
+
+    The fetched libdjinterop 0.24.3 dependency treats every warning as an
+    error and its bundled date header triggers a GCC 14 false positive. The
+    supplied Mixxx CMake patch disables error promotion only for that warning,
+    only inside the fetched dependency and only on GCC 14 or newer.

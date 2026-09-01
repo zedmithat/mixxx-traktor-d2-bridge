@@ -41,6 +41,17 @@ def main():
     assert "ZED / " in source
     assert "ProtectSystem=strict" in service
     assert "IOSchedulingClass=idle" in service
+    for hardening in (
+        "NoNewPrivileges=true",
+        "PrivateDevices=true",
+        "ProtectHome=read-only",
+        "CapabilityBoundingSet=",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        "RestrictNamespaces=true",
+        "SystemCallArchitectures=native",
+        "UMask=0077",
+    ):
+        assert hardening in service, hardening
     manager_source = MODULE_PATH.read_text(encoding="utf-8")
     assert "_authenticated" in manager_source
     assert '<html lang="en">' in manager_source

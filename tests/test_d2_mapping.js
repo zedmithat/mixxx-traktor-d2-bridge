@@ -91,6 +91,33 @@ values[k("[Channel1]", "beat_distance")] = 0.25;
 values[k("[Channel2]", "beat_distance")] = 0.50;
 
 D2.init("test", false);
+/* Track attach must not synchronously flood PortMidi with 16 marker packets
+ * on top of the identity/state transaction. Marker rows are sent from one
+ * coalesced one-shot after the transaction has drained. */
+if (countPayloadPrefix("D2|1|CUE1|") !== 0 ||
+    countPayloadPrefix("D2|2|CUE1|") !== 0)
+    throw new Error("hotcue markers were sent inside the track-load burst");
+timers.filter(function(timer) { return timer.interval === 40; }).forEach(
+    function(timer) { timer.callback(); });
+if (countPayloadPrefix("D2|1|CUE1|") !== 1 ||
+    countPayloadPrefix("D2|2|CUE1|") !== 1)
+    throw new Error("coalesced track markers were not published once per deck");
+
+/* Mixxx updates all hotcue position/colour COs in one GUI turn. Regardless
+ * of callback count, only the newest 40 ms marker snapshot may emit. */
+var markerTimerStart = timers.length;
+var markerMessageStart = countPayloadPrefix("D2|1|CUE1|");
+values[k("[Channel1]", "hotcue_1_position")] = 420 * 44100 * 0.1;
+for (var markerCallback = 0; markerCallback < 16; markerCallback++)
+    D2.hotcueChanged("[Channel1]");
+if (countPayloadPrefix("D2|1|CUE1|") !== markerMessageStart)
+    throw new Error("hotcue callback bypassed the marker coalescer");
+timers.slice(markerTimerStart).filter(function(timer) {
+    return timer.interval === 40;
+}).forEach(function(timer) { timer.callback(); });
+if (countPayloadPrefix("D2|1|CUE1|") !== markerMessageStart + 1)
+    throw new Error("hotcue callback storm emitted more than one marker snapshot");
+
 var startupTrackCounts = {
     1: countPayloadPrefix("D2|1|TRACKID|"),
     2: countPayloadPrefix("D2|2|TRACKID|")

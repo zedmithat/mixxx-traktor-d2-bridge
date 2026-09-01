@@ -67,6 +67,8 @@ toolbar or the D2 Browse `R1` menu.
 - Live EffectManifest names on the D2 FX overlay (no numeric effect indexes)
 - Mixxx controller JavaScript, MIDI XML and regression tests
 - Recovery hook for reopening Mixxx after the bridge ALSA client changes
+- Coalesced Hot Cue marker publishing so track-load callback storms cannot
+  overflow PortMidi or interrupt the D2 control path
 - Authenticated, dependency-free ZED LAN manager for browsing an attached DJ
   USB, importing selected folders into the local archive, reporting progress,
   requesting a native Mixxx library scan and safely unmounting the device
@@ -114,11 +116,17 @@ node tests/test_d2_comprehensive.js
 node tests/test_d2_complete_controls.js
 node tests/test_d2_load_polling.js
 node tests/test_d2_fx_roundtrip.js
+node tests/test_d2_smart_playlists.js
 python3 tests/test_time_display_modes.py
 python3 tests/test_zed_fx_layout.py
+python3 tests/test_zed_launch_animation.py
+python3 tests/test_d2_smart_playlist_source.py
+python3 tests/test_zed_boot_splash.py
 python3 tests/test_zed_usb_monitor.py
 python3 tests/test_zed_manager.py
 python3 tests/test_zed_folder_playlists.py
+python3 tests/test_d2_usb_source.py
+python3 tests/test_d2_usb_player_source.py
 python3 tests/check_c_braces.py
 ```
 
@@ -130,11 +138,17 @@ D2_COMPREHENSIVE_TEST_OK
 D2_COMPLETE_CONTROLS_OK
 D2_LOAD_POLLING_CONTRACT_OK
 D2_FX_ROUNDTRIP_TEST_OK
+D2_SMART_PLAYLISTS_JS_TEST_OK
 TIME_DISPLAY_MODES_TEST_OK
 ZED_FX_LAYOUT_TEST_OK
+ZED_LAUNCH_ANIMATION_TEST_OK
+D2_SMART_PLAYLIST_SOURCE_TEST_OK
+ZED_BOOT_SPLASH_TEST_OK
 ZED_USB_MONITOR_TEST_OK
 ZED_MANAGER_TEST_OK
 ZED_FOLDER_PLAYLIST_TEST_OK
+D2_USB_SOURCE_TEST_OK
+D2_USB_PLAYER_SOURCE_TEST_OK
 C_BRACE_TEST_OK
 ```
 
@@ -201,6 +215,12 @@ traffic. Use it only on a trusted private network and do not forward port 8088
 to the internet. Stop it with `systemctl --user disable --now
 zed-manager.service` when remote management is not wanted.
 
+The supplied user service also applies a read-only system/home view, an empty
+capability set, private devices and temporary files, restricted namespaces,
+address families and system-call groups, plus a private `0077` file-creation
+mask. Its only writable paths are the ZED music archive, its private
+configuration directory and the per-user runtime directory.
+
 ## FX controls
 
 The Player page exposes Effect Unit 1 above Deck A and Effect Unit 2 above
@@ -240,8 +260,9 @@ without changing the Mixxx library:
 
 ```sh
 chmod +x tests/fixtures/d2_fake_beatmap.sh
+track_id=123 # replace with any active ID from your Mixxx library
 D2_BEATGRID_HELPER="$PWD/tests/fixtures/d2_fake_beatmap.sh" \
-  ./d2_bridge_metadata --track-metadata-test 122
+  ./d2_bridge_metadata --track-metadata-test "$track_id"
 ```
 
 The expected status is `beatgrid=0 beatmap=1`. The environment override is
@@ -264,6 +285,11 @@ localized names and Mixxx short names do not rely on numeric index guesses.
 Apply `mixxx-source-patches/wnumberpos-two-mode.patch` to make the dedicated
 main-screen time widget toggle only between elapsed and remaining time. The
 patch also normalizes the legacy combined-mode setting and updates its tooltip.
+On Raspberry Pi OS releases using GCC 14 or newer, also apply
+`mixxx-source-patches/libdjinterop-gcc14.patch` before the first CMake
+configure. It scopes `-Wno-error=stringop-overflow` to Mixxx's fetched
+libdjinterop 0.24.3 build, whose bundled date header otherwise triggers a GCC
+14 false positive under that dependency's unconditional `-Werror` setting.
 The controller sends that ID before `LOAD`; the bridge then resolves a single
 `library.id` row and its exact `track_locations.location`. Track duration is
 used only for normalized rendering and never for metadata selection. If the
@@ -273,7 +299,7 @@ SysEx chunks and resolved with `track_locations.location = ?`.
 The bridge also provides a non-USB verification path:
 
 ```sh
-./d2_bridge_metadata --track-metadata-test 122
+./d2_bridge_metadata --track-metadata-test 123 # use an active library ID
 ./d2_bridge_metadata --track-location-test "/absolute/path/to/track.mp3"
 ```
 
@@ -286,7 +312,10 @@ Keep `ctlra_idle_iter()` at a 10 ms interval. It also flushes LED feedback; runn
 
 ## Status
 
-This repository is a hardware-specific working snapshot and is still under active development. Back up an existing Mixxx/libctlra installation before applying source patches.
+This repository is a hardware-specific working snapshot. The current build,
+controller, display, library and two-device runtime gates are recorded in
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md). Back up an existing
+Mixxx/libctlra installation before applying source patches.
 
 ## Licensing and attribution
 

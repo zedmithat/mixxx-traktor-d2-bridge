@@ -267,6 +267,12 @@ var hotcueConnection = connections.filter(function(connection) {
 var sysexBeforeHotcue = sysex.length;
 values[key("[Channel1]", "hotcue_1_position")] = 44100;
 hotcueConnection.callback(44100);
+assert(sysex.length === sysexBeforeHotcue,
+    "Hotcue callback bypassed the 40 ms PortMidi coalescer");
+var hotcuePositionTimer = timers[timers.length - 1];
+assert(hotcuePositionTimer.interval === 40,
+    "Hotcue position did not schedule the marker coalescer");
+hotcuePositionTimer.callback();
 assert(sysex.length > sysexBeforeHotcue && sysex.some(function(message) {
     return sysexText(message).indexOf("D2|1|CUE1|") === 0;
 }), "Hotcue overview did not refresh from a main-UI change");
@@ -278,6 +284,10 @@ values[key("[Channel1]", "hotcue_1_status")] = 1;
 values[key("[Channel1]", "hotcue_1_color")] = 0x123456;
 var hotcueColorStart = sysex.length;
 hotcueColorConnection.callback(0x123456);
+var hotcueColorTimer = timers[timers.length - 1];
+assert(hotcueColorTimer.interval === 40,
+    "Hotcue color did not schedule the marker coalescer");
+hotcueColorTimer.callback();
 assert(sysex.slice(hotcueColorStart).some(function(message) {
     return sysexText(message) === "D2|1|CUECOLOR1|1193046";
 }), "real Mixxx Hotcue color was not published to the overview renderer");

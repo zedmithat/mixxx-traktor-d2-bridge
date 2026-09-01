@@ -23,6 +23,9 @@ D2.stemsSupported = false;
 D2.phaseTimer = null;
 D2.browseSnapshotTimer = null;
 D2.browseSortTimer = null;
+D2.markerRefreshTimer = {"[Channel1]": null, "[Channel2]": null};
+D2.markerRefreshToken = {"[Channel1]": 0, "[Channel2]": 0};
+D2.markerRefreshForce = {"[Channel1]": false, "[Channel2]": false};
 D2.smartMenu = {"[Channel1]": false, "[Channel2]": false};
 D2.smartIndex = {"[Channel1]": 0, "[Channel2]": 0};
 D2.smartListCount = 6;
@@ -379,8 +382,7 @@ D2.refreshLEDs = function(group) {
     D2.sendState(group, "LEDPACK", fields.join(","));
 };
 
-D2.publishDeckMarkers = function(group) {
-    var deck = D2.deckNumber(group);
+D2.publishDeckMarkers = function(group, force) {
     var activeGroup = D2.activeGroup(group);
     var duration = Number(engine.getValue(activeGroup, "duration") || 0);
     var sampleRate = Number(engine.getValue(activeGroup, "track_samplerate") || 0);
@@ -388,10 +390,32 @@ D2.publishDeckMarkers = function(group) {
         var frame = Number(engine.getValue(activeGroup, "hotcue_" + cue + "_position"));
         var normalized = frame >= 0 && duration > 0 && sampleRate > 0 ?
             frame / (duration * sampleRate) : -1;
-        D2.sendSysexText("D2|" + deck + "|CUE" + cue + "|" + normalized.toFixed(6));
+        D2.sendState(group, "CUE" + cue, normalized.toFixed(6), !!force);
         D2.sendState(group, "CUECOLOR" + cue,
-            D2.hotcueColor(activeGroup, cue), true);
+            D2.hotcueColor(activeGroup, cue), !!force);
     }
+};
+
+/* A track attach updates position and colour for all eight hotcues in one GUI
+ * turn. Sending the complete marker set from every callback can submit
+ * hundreds of SysEx packets in a few milliseconds and overflow PortMidi's
+ * ALSA output queue. Coalesce the callback storm, preserve ordering and send
+ * one cached marker snapshot after the authoritative track transaction. */
+D2.scheduleDeckMarkers = function(group, force) {
+    D2.markerRefreshForce[group] =
+        D2.markerRefreshForce[group] || !!force;
+    var token = (D2.markerRefreshToken[group] || 0) + 1;
+    D2.markerRefreshToken[group] = token;
+    if (D2.markerRefreshTimer[group])
+        engine.stopTimer(D2.markerRefreshTimer[group]);
+    D2.markerRefreshTimer[group] = engine.beginTimer(40, function() {
+        if (D2.markerRefreshToken[group] !== token) return;
+        D2.markerRefreshTimer[group] = null;
+        var markerForce = D2.markerRefreshForce[group];
+        D2.markerRefreshForce[group] = false;
+        D2.publishDeckMarkers(group, markerForce);
+        D2.refreshLEDs(group);
+    }, true);
 };
 
 D2.publishTrackLoad = function(group) {
@@ -420,7 +444,7 @@ D2.publishTrackLoad = function(group) {
          * state, visual key or beat window. Replay one coherent live snapshot
          * only after the complete TRACKID/LOCATION -> LOAD transaction. */
         D2.sendDeckState(group, true);
-        D2.publishDeckMarkers(group);
+        D2.scheduleDeckMarkers(group, true);
         /* The bridge also invalidates its phase rows at identity start. Force
          * the current pair even when the four-step payload is unchanged. */
         D2.updatePhaseMeter(true);
@@ -590,8 +614,7 @@ D2.beatActiveChanged = function(trackGroup, value) {
 D2.hotcueChanged = function(trackGroup) {
     ["[Channel1]", "[Channel2]"].forEach(function(surfaceGroup) {
         if (D2.activeGroup(surfaceGroup) === trackGroup) {
-            D2.publishDeckMarkers(surfaceGroup);
-            D2.refreshLEDs(surfaceGroup);
+            D2.scheduleDeckMarkers(surfaceGroup, false);
         }
     });
 };
@@ -828,6 +851,12 @@ D2.init = function(id, debugging) {
     D2.smartMenu["[Channel2]"] = false;
     D2.smartIndex["[Channel1]"] = 0;
     D2.smartIndex["[Channel2]"] = 0;
+    D2.markerRefreshTimer["[Channel1]"] = null;
+    D2.markerRefreshTimer["[Channel2]"] = null;
+    D2.markerRefreshToken["[Channel1]"] = 0;
+    D2.markerRefreshToken["[Channel2]"] = 0;
+    D2.markerRefreshForce["[Channel1]"] = false;
+    D2.markerRefreshForce["[Channel2]"] = false;
     D2.setDisplayView("[Channel1]", "DECK");
     D2.setDisplayView("[Channel2]", "DECK");
     D2.trackLoadConnections = [];
@@ -1086,6 +1115,13 @@ D2.shutdown = function() {
     if (D2.phaseTimer) engine.stopTimer(D2.phaseTimer);
     if (D2.browseSnapshotTimer) engine.stopTimer(D2.browseSnapshotTimer);
     if (D2.browseSortTimer) engine.stopTimer(D2.browseSortTimer);
+    ["[Channel1]", "[Channel2]"].forEach(function(surfaceGroup) {
+        if (D2.markerRefreshTimer[surfaceGroup])
+            engine.stopTimer(D2.markerRefreshTimer[surfaceGroup]);
+        D2.markerRefreshTimer[surfaceGroup] = null;
+        D2.markerRefreshForce[surfaceGroup] = false;
+        D2.markerRefreshToken[surfaceGroup]++;
+    });
     D2.trackLoadConnections = null;
     D2.loadRejectedConnections = null;
     D2.loadOutcomeConnections = null;
@@ -1254,7 +1290,7 @@ D2.padButton = function(channel, control, value, status, group) {
              * pad to a zero-length pulse. */
             engine.setValue(activeGroup, "hotcue_" + pad + "_activate", value ? 1 : 0);
         }
-        if (value) D2.publishDeckMarkers(group);
+        if (value) D2.scheduleDeckMarkers(group, false);
         D2.refreshLEDs(group);
         return;
     } else if (mode === "FREEZE") {

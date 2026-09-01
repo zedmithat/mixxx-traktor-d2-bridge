@@ -4,6 +4,19 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITOR = ROOT / "systemd" / "zed-usb-monitor.py"
+SERVICE = (ROOT / "systemd" / "zed-usb-monitor.service").read_text(
+    encoding="utf-8")
+
+for hardening in (
+    "NoNewPrivileges=true",
+    "PrivateDevices=true",
+    "ProtectSystem=strict",
+    "CapabilityBoundingSet=",
+    "RestrictAddressFamilies=AF_UNIX",
+    "RestrictNamespaces=true",
+    "UMask=0077",
+):
+    assert hardening in SERVICE, hardening
 
 
 with tempfile.TemporaryDirectory() as temp_dir:
