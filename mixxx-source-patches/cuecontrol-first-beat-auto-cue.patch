@@ -1,0 +1,189 @@
+diff --git a/src/engine/controls/cuecontrol.h b/src/engine/controls/cuecontrol.h
+index b0310f7..f99c097 100644
+--- a/src/engine/controls/cuecontrol.h
++++ b/src/engine/controls/cuecontrol.h
+@@ -36,6 +36,7 @@ enum class SeekOnLoadMode {
+     FirstSound = 2, // Skip leading silence
+     IntroStart = 3, // Use intro start cue point
+     FirstHotcue = 4,
++    FirstBeat = 5, // Use the first analyzed beat, unless a main cue is stored
+ };
+ 
+ /// Used for requesting a specific hotcue type when activating/setting a
+@@ -286,6 +287,7 @@ class CueControl : public EngineControl {
+     mixxx::audio::FramePos getQuantizedCurrentPosition();
+     TrackAt getTrackAt() const;
+     void seekOnLoad(mixxx::audio::FramePos seekOnLoadPosition);
++    bool seekToFirstBeatAutoCue(const TrackPointer& pTrack);
+     void setHotcueFocusIndex(int hotcueIndex);
+     int getHotcueFocusIndex() const;
+     mixxx::RgbColor colorFromConfig(const ConfigKey& configKey);
+diff --git a/src/engine/controls/cuecontrol.cpp b/src/engine/controls/cuecontrol.cpp
+index f04fd43..6428852 100644
+--- a/src/engine/controls/cuecontrol.cpp
++++ b/src/engine/controls/cuecontrol.cpp
+@@ -6,6 +6,7 @@
+ #include "engine/enginebuffer.h"
+ #include "moc_cuecontrol.cpp"
+ #include "preferences/colorpalettesettings.h"
++#include "track/beats.h"
+ #include "track/track.h"
+ #include "util/color/predefinedcolorpalettes.h"
+ #include "vinylcontrol/defs_vinylcontrol.h"
+@@ -547,6 +548,23 @@ void CueControl::trackLoaded(TrackPointer pNewTrack) {
+         }
+         break;
+     }
++    case SeekOnLoadMode::FirstBeat: {
++        if (seekToFirstBeatAutoCue(pNewTrack)) {
++            return;
++        }
++        /* Beat analysis may not be available on the first load yet. Avoid
++         * audible leading silence while waiting; trackBeatsUpdated() or
++         * trackAnalyzed() will move to the first reliable beat only if the
++         * performer has not manually moved the deck in the meantime. */
++        CuePointer pN60dBSound =
++                pNewTrack->findCueByType(mixxx::CueType::N60dBSound);
++        if (pN60dBSound && pN60dBSound->getPosition().isValid()) {
++            seekOnLoad(pN60dBSound->getPosition());
++        } else {
++            seekOnLoad(mixxx::audio::kStartFramePos);
++        }
++        return;
++    }
+     case SeekOnLoadMode::MainCue: {
+         // Take main cue position from CO instead of cue point list because
+         // value in CO will be quantized if quantization is enabled
+@@ -596,6 +614,37 @@ void CueControl::seekOnLoad(mixxx::audio::FramePos seekOnLoadPosition) {
+     m_usedSeekOnLoadPosition.setValue(seekOnLoadPosition);
+ }
+ 
++bool CueControl::seekToFirstBeatAutoCue(const TrackPointer& pTrack) {
++    if (!pTrack) {
++        return false;
++    }
++
++    /* A deliberately stored Main Cue always wins. Hot cues are intentionally
++     * never inspected or modified by this load policy. */
++    const auto mainCuePosition = pTrack->getMainCuePosition();
++    if (mainCuePosition.isValid() &&
++            mainCuePosition != mixxx::audio::kStartFramePos) {
++        seekOnLoad(mainCuePosition);
++        return true;
++    }
++
++    const auto pBeats = pTrack->getBeats();
++    if (!pBeats) {
++        return false;
++    }
++    const auto firstBeatPosition = pBeats->firstBeat();
++    if (!firstBeatPosition.isValid()) {
++        return false;
++    }
++
++    /* Persist this as the independent Main Cue so the hardware CUE button
++     * returns to the same first kick. Track::setMainCuePosition emits
++     * cuesUpdated, which refreshes the cue_point ControlObject. */
++    pTrack->setMainCuePosition(firstBeatPosition);
++    seekOnLoad(firstBeatPosition);
++    return true;
++}
++
+ void CueControl::slotCueModeChanged(double) {
+     // This will call updateIndicatorsAndModifyPlay() with the current play state
+     // and update cue/play indicators.
+@@ -765,6 +814,15 @@ void CueControl::trackAnalyzed() {
+     SeekOnLoadMode seekOnLoadMode = getSeekOnLoadPreference();
+ 
+     switch (seekOnLoadMode) {
++    case SeekOnLoadMode::FirstBeat: {
++        TrackPointer pLoadedTrack;
++        {
++            auto lock = lockMutex(&m_trackMutex);
++            pLoadedTrack = m_pLoadedTrack;
++        }
++        seekToFirstBeatAutoCue(pLoadedTrack);
++        break;
++    }
+     case SeekOnLoadMode::MainCue: {
+         const auto position =
+                 mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(
+@@ -796,6 +854,15 @@ void CueControl::trackCuesUpdated() {
+ void CueControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
+     Q_UNUSED(pBeats);
+     loadCuesFromTrack();
++    if (getSeekOnLoadPreference() == SeekOnLoadMode::FirstBeat &&
++            frameInfo().currentPosition == m_usedSeekOnLoadPosition.getValue()) {
++        TrackPointer pLoadedTrack;
++        {
++            auto lock = lockMutex(&m_trackMutex);
++            pLoadedTrack = m_pLoadedTrack;
++        }
++        seekToFirstBeatAutoCue(pLoadedTrack);
++    }
+ }
+ 
+ void CueControl::quantizeChanged(double v) {
+diff --git a/src/preferences/dialog/dlgprefdeck.cpp b/src/preferences/dialog/dlgprefdeck.cpp
+index 15625a8..c7de335 100644
+--- a/src/preferences/dialog/dlgprefdeck.cpp
++++ b/src/preferences/dialog/dlgprefdeck.cpp
+@@ -153,6 +153,7 @@ DlgPrefDeck::DlgPrefDeck(QWidget* parent, UserSettingsPointer pConfig)
+     comboBoxLoadPoint->addItem(tr("Intro start"), static_cast<int>(SeekOnLoadMode::IntroStart));
+     comboBoxLoadPoint->addItem(tr("Main cue"), static_cast<int>(SeekOnLoadMode::MainCue));
+     comboBoxLoadPoint->addItem(tr("First hotcue"), static_cast<int>(SeekOnLoadMode::FirstHotcue));
++    comboBoxLoadPoint->addItem(tr("First beat (Auto Cue)"), static_cast<int>(SeekOnLoadMode::FirstBeat));
+     comboBoxLoadPoint->addItem(tr("First sound (skip silence)"), static_cast<int>(SeekOnLoadMode::FirstSound));
+     comboBoxLoadPoint->addItem(tr("Beginning of track"), static_cast<int>(SeekOnLoadMode::Beginning));
+     bool seekModeExisted = m_pConfig->exists(
+diff --git a/src/test/cuecontrol_test.cpp b/src/test/cuecontrol_test.cpp
+index 022eb86..1478ea3 100644
+--- a/src/test/cuecontrol_test.cpp
++++ b/src/test/cuecontrol_test.cpp
+@@ -1,5 +1,6 @@
+ #include "engine/controls/cuecontrol.h"
+ #include "test/signalpathtest.h"
++#include "track/beats.h"
+ 
+ class CueControlTest : public BaseSignalPathTest {
+   protected:
+@@ -319,6 +320,39 @@ TEST_F(CueControlTest, SeekOnLoadMainCue) {
+     EXPECT_FRAMEPOS_EQ(mixxx::audio::FramePos(200.0), getCurrentFramePos());
+ }
+ 
++TEST_F(CueControlTest, SeekOnLoadFirstBeatSetsIndependentMainCue) {
++    config()->set(ConfigKey("[Controls]", "CueRecall"),
++            ConfigValue(static_cast<int>(SeekOnLoadMode::FirstBeat)));
++    TrackPointer pTrack = createTestTrack();
++    const auto firstBeatPosition = mixxx::audio::FramePos(11025.0);
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(), firstBeatPosition, mixxx::Bpm(120.0))));
++
++    loadTrack(pTrack);
++
++    EXPECT_FRAMEPOS_EQ(firstBeatPosition, getCurrentFramePos());
++    EXPECT_FRAMEPOS_EQ(firstBeatPosition, pTrack->getMainCuePosition());
++    EXPECT_FRAMEPOS_EQ_CONTROL(firstBeatPosition, m_pCuePoint);
++}
++
++TEST_F(CueControlTest, SeekOnLoadFirstBeatPreservesStoredMainCue) {
++    config()->set(ConfigKey("[Controls]", "CueRecall"),
++            ConfigValue(static_cast<int>(SeekOnLoadMode::FirstBeat)));
++    TrackPointer pTrack = createTestTrack();
++    const auto storedMainCue = mixxx::audio::FramePos(22050.0);
++    pTrack->setMainCuePosition(storedMainCue);
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(),
++            mixxx::audio::FramePos(44100.0),
++            mixxx::Bpm(120.0))));
++
++    loadTrack(pTrack);
++
++    EXPECT_FRAMEPOS_EQ(storedMainCue, getCurrentFramePos());
++    EXPECT_FRAMEPOS_EQ(storedMainCue, pTrack->getMainCuePosition());
++    EXPECT_FRAMEPOS_EQ_CONTROL(storedMainCue, m_pCuePoint);
++}
++
+ TEST_F(CueControlTest, DontSeekOnLoadMainCue) {
+     config()->set(ConfigKey("[Controls]", "CueRecall"),
+             ConfigValue(static_cast<int>(SeekOnLoadMode::MainCue)));

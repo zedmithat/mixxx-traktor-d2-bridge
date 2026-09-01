@@ -56,22 +56,6 @@ D2.pulse = function(group, control) {
     engine.setValue(group, control, 0);
 };
 
-/* Main-cue position is stored in engine frames, while playposition is a
- * normalized 0..1 value.  Comparing the two avoids relying on the blinking
- * cue_indicator (which is also non-zero when a Pioneer cue is armed away
- * from the cue point). */
-D2.isAtMainCue = function(group) {
-    var position = Number(engine.getValue(group, "playposition"));
-    var cueFrame = Number(engine.getValue(group, "cue_point"));
-    var trackFrames = Number(engine.getValue(group, "track_samples"));
-    if (!isFinite(position) || !isFinite(cueFrame) || !isFinite(trackFrames) ||
-        trackFrames <= 0 || cueFrame < 0) return false;
-    var cuePosition = cueFrame / trackFrames;
-    /* A frame-accurate cue can still be reported with a small GUI/engine
-     * delay.  Keep the tolerance below one video frame at normal tempos. */
-    return Math.abs(position - cuePosition) <= 0.0025;
-};
-
 D2.isClockwise = function(value) {
     /* Bridge relative protocol: 65 clockwise, 63 counter-clockwise. Keep the
      * fallback for controllers that report small positive deltas, but never
@@ -456,6 +440,15 @@ D2.publishTrackLoad = function(group) {
 };
 
 D2.trackLoaded = function(trackGroup, value) {
+    ["[Channel1]", "[Channel2]"].forEach(function(surfaceGroup) {
+        if (D2.activeGroup(surfaceGroup) === trackGroup) {
+            /* A load/unload invalidates any momentary transport gesture from
+             * the previous track.  The following physical CUE event must
+             * always start a fresh native cue_cdj transaction. */
+            D2.cueHeld[surfaceGroup] = false;
+            D2.cuePreviewing[surfaceGroup] = false;
+        }
+    });
     if (!value) {
         /* EngineBuffer may briefly publish an unload while replacing a track,
          * and a delayed failure from an older request must not erase a newer
@@ -1029,8 +1022,8 @@ D2.shutdown = function() {
             engine.setValue(state.targetGroup, "jog", 0);
         D2.touchStripState[surfaceGroup] = null;
         D2.touchStripPressed[surfaceGroup] = false;
-        if (D2.cuePreviewing[surfaceGroup])
-            engine.setValue(activeGroup, "cue_preview", 0);
+        if (D2.cueHeld[surfaceGroup])
+            engine.setValue(activeGroup, "cue_cdj", 0);
         D2.cueHeld[surfaceGroup] = false;
         D2.cuePreviewing[surfaceGroup] = false;
         var loopBeats = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
@@ -1200,18 +1193,15 @@ D2.fxSelectButton = function(channel, control, value, status, group) {
 D2.playButton = function(channel, control, value, status, group) {
     if (!value) return;
     var activeGroup = D2.activeGroup(group);
-    /* During a main-cue preview Mixxx reports play=1. Its native cue engine
-     * explicitly treats a following play=0 request as a latch command: it
-     * clears preview state and keeps playback running. */
-    if (D2.cuePreviewing[group]) {
-        engine.setValue(activeGroup, "play", 0);
-        D2.cueHeld[group] = false;
+    /* PLAY is always a single physical toggle request. During cue_cdj
+     * preview Mixxx deliberately interprets play=0 as "latch playback": it
+     * leaves the deck running and clears its internal preview state. Keep
+     * cueHeld true until the real CUE-UP arrives; only the preview ownership
+     * changes here. */
+    var playing = engine.getValue(activeGroup, "play") ? 1 : 0;
+    engine.setValue(activeGroup, "play", playing ? 0 : 1);
+    if (D2.cuePreviewing[group])
         D2.cuePreviewing[group] = false;
-    } else {
-        /* PLAY is a true pause/play toggle outside CUE preview. */
-        var playing = engine.getValue(activeGroup, "play") ? 1 : 0;
-        engine.setValue(activeGroup, "play", playing ? 0 : 1);
-    }
     D2.sendDeckState(group);
 };
 
@@ -1224,29 +1214,19 @@ D2.cueButton = function(channel, control, value, status, group) {
     }
 
     if (value) {
-        var playing = engine.getValue(activeGroup, "play") ? 1 : 0;
-        if (playing) {
-            /* Playing: stop immediately and return to the stored main cue. */
-            D2.pulse(activeGroup, "cue_gotoandstop");
-            D2.cueHeld[group] = false;
-            D2.cuePreviewing[group] = false;
-        } else if (D2.isAtMainCue(activeGroup)) {
-            /* Stopped at cue: start momentary preview; release returns to cue. */
-            D2.cueHeld[group] = true;
-            D2.cuePreviewing[group] = true;
-            engine.setValue(activeGroup, "cue_preview", 1);
-        } else {
-            /* Stopped away from cue: Pioneer stores this position as the new
-             * main cue and immediately previews from it while CUE is held. */
-            D2.pulse(activeGroup, "cue_set");
-            D2.cueHeld[group] = true;
-            D2.cuePreviewing[group] = true;
-            engine.setValue(activeGroup, "cue_preview", 1);
-        }
-    } else if (D2.cuePreviewing[group]) {
-        /* The dedicated CUE CC transmits release reliably. Let Mixxx's native
-         * preview release stop playback and seek exactly back to main cue. */
-        engine.setValue(activeGroup, "cue_preview", 0);
+        var wasPlaying = engine.getValue(activeGroup, "play") ? 1 : 0;
+        D2.cueHeld[group] = true;
+        /* cue_cdj is Mixxx's atomic Pioneer state machine. It distinguishes
+         * playing -> return/stop, paused away -> set main cue, and paused at
+         * cue -> momentary preview without controller-side position guesses. */
+        engine.setValue(activeGroup, "cue_cdj", 1);
+        D2.cuePreviewing[group] = !wasPlaying &&
+            !!engine.getValue(activeGroup, "play");
+    } else if (D2.cueHeld[group]) {
+        /* Always close the native press/release transaction. After CUE+PLAY
+         * Mixxx has already latched normal playback, so this release is a
+         * harmless no-op and the deck keeps playing. */
+        engine.setValue(activeGroup, "cue_cdj", 0);
         D2.cueHeld[group] = false;
         D2.cuePreviewing[group] = false;
     }

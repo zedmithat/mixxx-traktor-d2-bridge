@@ -164,3 +164,13 @@ green before the next item starts.
     error and its bundled date header triggers a GCC 14 false positive. The
     supplied Mixxx CMake patch disables error promotion only for that warning,
     only inside the fetched dependency and only on GCC 14 or newer.
+
+18. Replace controller-side CUE emulation with Mixxx's native Pioneer state
+    machine and add first-beat Auto Cue.
+
+    Both D2s now forward the physical CUE down/up pair to `cue_cdj`. PLAY is a
+    single toggle request, including the native CUE+PLAY latch path, and track
+    replacement clears only controller gesture state. The optional First Beat
+    load mode stores the first analyzed beat as Main Cue, preserves an existing
+    non-default Main Cue and never reads or changes Hot Cues. Two-surface JS
+    state-machine tests and five targeted Mixxx C++ cue tests pass.

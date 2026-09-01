@@ -11,12 +11,16 @@ Mixxx 2.5.6 custom build, two stock Traktor Kontrol D2 units.
 - Load-rejection and complete native functionality contracts
 - Clean Mixxx Release configure/build in an isolated directory
 - GCC 14 fetched-libdjinterop reproducibility patch
+- Mixxx First Beat Auto Cue build plus targeted `CueControlTest` gate
 
 ## Controller and UI gates
 
 - Complete two-deck input/LED mapping suite
-- PLAY/CUE, Browse, FX, loop, roll/freeze, beatjump, sampler and touch-strip
-  contracts
+- Native Pioneer PLAY/CUE down/up, hold preview, return-to-cue, paused cue-set
+  and CUE+PLAY latch contracts on both deck surfaces
+- Main Cue/Hot Cue independence and stored-Main-Cue precedence over First Beat
+  Auto Cue
+- Browse, FX, loop, roll/freeze, beatjump, sampler and touch-strip contracts
 - Exact track identity/load polling and failure feedback
 - Hot Cue overview/colour updates with PortMidi callback coalescing
 - Smart Lists, sorting, Player time modes, Zed FX layout and launch animation

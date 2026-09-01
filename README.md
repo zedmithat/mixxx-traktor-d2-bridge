@@ -48,7 +48,11 @@ toolbar or the D2 Browse `R1` menu.
 
 - Two physical D2 units with deterministic deck assignment
 - Complete HID input to ALSA MIDI bridge
-- PLAY/CUE state handling, Browse navigation, loop, beatjump, pads, FX and faders
+- Native Pioneer/CDJ PLAY/CUE state machine: Main Cue set/return, hold preview,
+  release-to-cue and CUE+PLAY latch on both D2 units
+- Optional First Beat Auto Cue load mode; a stored Main Cue wins and Hot Cues
+  remain completely independent
+- Browse navigation, loop, beatjump, pads, FX and faders
 - Live 4x2 D2 pad feedback for Loop, Roll/Freeze and Beatjump performance views
 - 480x272 RGB565 display output with independent rendering and complete-frame USB transfers
 - Three-band waveform, overview, beat grid, phase meter, BPM, key, loop and hotcue state
@@ -113,6 +117,7 @@ Run from the repository root:
 ```sh
 node tests/test_d2_mapping.js
 node tests/test_d2_comprehensive.js
+node tests/test_d2_pioneer_cue.js
 node tests/test_d2_complete_controls.js
 node tests/test_d2_load_polling.js
 node tests/test_d2_fx_roundtrip.js
@@ -285,6 +290,13 @@ localized names and Mixxx short names do not rely on numeric index guesses.
 Apply `mixxx-source-patches/wnumberpos-two-mode.patch` to make the dedicated
 main-screen time widget toggle only between elapsed and remaining time. The
 patch also normalizes the legacy combined-mode setting and updates its tooltip.
+Apply `mixxx-source-patches/cuecontrol-first-beat-auto-cue.patch` to add the
+`First beat (Auto Cue)` deck load mode. Select it in Preferences > Decks, or
+set `[Controls] CueRecall` to `5`. If a track already has a non-default Main
+Cue, that cue is preserved and used; otherwise the first analyzed beat is
+stored as Main Cue. The D2 controller sends press and release directly to
+Mixxx's native `[ChannelN],cue_cdj` Control Object, so no JavaScript timing or
+approximate play-position comparison participates in CUE behavior.
 On Raspberry Pi OS releases using GCC 14 or newer, also apply
 `mixxx-source-patches/libdjinterop-gcc14.patch` before the first CMake
 configure. It scopes `-Wno-error=stringop-overflow` to Mixxx's fetched

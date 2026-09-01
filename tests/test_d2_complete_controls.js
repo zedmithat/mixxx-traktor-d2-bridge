@@ -10,6 +10,7 @@ var connections = [];
 var timers = [];
 var scratchEvents = [];
 var scratching = {};
+var nativeCuePreview = {};
 
 function key(group, control) { return group + "|" + control; }
 function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -43,8 +44,42 @@ global.engine = {
         return 0;
     },
     setValue: function(group, control, value) {
-        values[key(group, control)] = value;
         calls.push(["value", group, control, value]);
+        if (control === "cue_cdj") {
+            values[key(group, control)] = value;
+            if (value) {
+                var playing = !!values[key(group, "play")];
+                var samples = Number(values[key(group, "track_samples")]) || 0;
+                var cuePoint = Number(values[key(group, "cue_point")]) || 0;
+                var cueRatio = samples > 0 ? cuePoint / samples : 0;
+                var position = Number(values[key(group, "playposition")]) || 0;
+                if (playing) {
+                    values[key(group, "play")] = 0;
+                    values[key(group, "playposition")] = cueRatio;
+                    nativeCuePreview[group] = false;
+                } else if (Math.abs(position - cueRatio) <= 0.000001) {
+                    values[key(group, "play")] = 1;
+                    nativeCuePreview[group] = true;
+                } else {
+                    values[key(group, "cue_point")] = position * samples;
+                    nativeCuePreview[group] = false;
+                }
+            } else if (nativeCuePreview[group]) {
+                var total = Number(values[key(group, "track_samples")]) || 0;
+                var mainCue = Number(values[key(group, "cue_point")]) || 0;
+                values[key(group, "play")] = 0;
+                values[key(group, "playposition")] = total > 0 ? mainCue / total : 0;
+                nativeCuePreview[group] = false;
+            }
+            return;
+        }
+        if (control === "play" && !value && nativeCuePreview[group]) {
+            /* Mixxx treats PLAY during cue_cdj preview as a latch request. */
+            nativeCuePreview[group] = false;
+            values[key(group, "play")] = 1;
+            return;
+        }
+        values[key(group, control)] = value;
     },
     getParameter: function(group, control) { return parameters[key(group, control)] || 0; },
     setParameter: function(group, control, value) {
@@ -385,33 +420,39 @@ surfaces.forEach(function(surface, surfaceIndex) {
     resetCalls();
     values[key(initialGroup, "play")] = 1;
     D2.cueButton(0, 0x5C, 0x7F, 0, surface);
-    assert(called(initialGroup, "cue_gotoandstop", 1),
-        surface + " playing cue did not return/stop");
+    assert(called(initialGroup, "cue_cdj", 1) &&
+           values[key(initialGroup, "play")] === 0,
+        surface + " playing cue did not use native CDJ return/stop");
+    D2.cueButton(0, 0x5C, 0, 0, surface);
+    assert(called(initialGroup, "cue_cdj", 0),
+        surface + " playing cue release did not close native transaction");
     resetCalls();
     values[key(initialGroup, "play")] = 0;
     values[key(initialGroup, "playposition")] = 0.25;
     D2.cueButton(0, 0x5C, 0x7F, 0, surface);
-    assert(called(initialGroup, "cue_preview", 1),
-        surface + " cue preview did not start at cue");
-    values[key(initialGroup, "play")] = 1;
+    assert(called(initialGroup, "cue_cdj", 1) &&
+           values[key(initialGroup, "play")] === 1,
+        surface + " native cue preview did not start at cue");
     D2.playButton(0, 0x5D, 0x7F, 0, surface);
     assert(called(initialGroup, "play", 0),
         surface + " cue-play latch did not use Mixxx native latch path");
     D2.cueButton(0, 0x5C, 0, 0, surface);
-    assert(!called(initialGroup, "cue_preview", 0),
+    assert(called(initialGroup, "cue_cdj", 0) &&
+           values[key(initialGroup, "play")] === 1,
         surface + " cue release stopped latched playback");
 
     resetCalls();
     values[key(initialGroup, "play")] = 0;
     values[key(initialGroup, "playposition")] = 0.60;
     D2.cueButton(0, 0x5C, 0x7F, 0, surface);
-    assert(called(initialGroup, "cue_set", 1),
+    assert(called(initialGroup, "cue_cdj", 1) &&
+           values[key(initialGroup, "cue_point")] === 0.60 * 88200,
         surface + " paused cue did not set a new cue point");
-    assert(called(initialGroup, "cue_preview", 1),
-        surface + " new cue did not start preview");
+    assert(values[key(initialGroup, "play")] === 0,
+        surface + " setting a new cue incorrectly started preview");
     D2.cueButton(0, 0x5C, 0, 0, surface);
-    assert(called(initialGroup, "cue_preview", 0),
-        surface + " cue preview release did not return to cue");
+    assert(called(initialGroup, "cue_cdj", 0),
+        surface + " cue-set release did not close native transaction");
 
     resetCalls();
     D2.shiftButton(0, 0x5A, 0x7F, 0, surface);
@@ -955,7 +996,7 @@ D2.padButton(0, 0x4D, 0x7F, 0, "[Channel2]");
 resetCalls();
 var shutdownSysexStart = sysex.length;
 D2.shutdown();
-assert(called("[Channel1]", "cue_preview", 0),
+assert(called("[Channel1]", "cue_cdj", 0),
     "shutdown did not release an active CUE preview");
 assert(called("[Channel1]", "hotcue_1_activate", 0),
     "shutdown did not release a held Hotcue pad");
