@@ -91,15 +91,15 @@ def audio_file(path: Path) -> bool:
 def safe_relative_path(value: str) -> Path:
     normalized = value.replace("\\", "/")
     if normalized.startswith("/"):
-        raise ValueError("Geçersiz kaynak yolu")
+        raise ValueError("Invalid source path")
     normalized = normalized.strip("/")
     if not normalized:
         return Path()
     pure = PurePosixPath(normalized)
     if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
-        raise ValueError("Geçersiz kaynak yolu")
+        raise ValueError("Invalid source path")
     if any(hidden_or_system(part) for part in pure.parts):
-        raise ValueError("Gizli veya sistem klasörü seçilemez")
+        raise ValueError("Hidden or system folders cannot be selected")
     return Path(*pure.parts)
 
 
@@ -108,7 +108,7 @@ def safe_entry_name(value: str) -> str:
     if (not name or name in (".", "..") or len(name) > 180 or
             "/" in name or "\\" in name or "\x00" in name or
             hidden_or_system(name)):
-        raise ValueError("Geçersiz dosya veya klasör adı")
+        raise ValueError("Invalid file or folder name")
     return name
 
 
@@ -119,12 +119,12 @@ def contained_path(root: Path, relative: Path) -> Path:
     for part in relative.parts:
         cursor /= part
         if cursor.is_symlink():
-            raise ValueError("Sembolik bağlantılar desteklenmiyor")
+            raise ValueError("Symbolic links are not supported")
     candidate = unresolved.resolve(strict=True)
     try:
         candidate.relative_to(root_resolved)
     except ValueError as error:
-        raise ValueError("Kaynak USB dışında") from error
+        raise ValueError("Path is outside the source USB") from error
     return candidate
 
 
@@ -152,7 +152,7 @@ def unique_destination(path: Path, source: Path) -> tuple[Path, bool]:
         candidate = path.with_name(f"{path.stem} (imported {index}){path.suffix}")
         if not candidate.exists():
             return candidate, False
-    raise OSError("Benzersiz hedef adı oluşturulamadı")
+    raise OSError("Could not create a unique destination name")
 
 
 def discover_audio(selection: Path) -> list[Path]:
@@ -194,7 +194,7 @@ class ManagerState:
         self.progress: dict[str, object] = {
             "active": False,
             "phase": "idle",
-            "message": "Hazır",
+            "message": "Ready",
             "files_total": 0,
             "files_done": 0,
             "files_copied": 0,
@@ -206,7 +206,7 @@ class ManagerState:
         self.upload: dict[str, object] = {
             "active": False,
             "phase": "idle",
-            "message": "Hazır",
+            "message": "Ready",
             "bytes_total": 0,
             "bytes_done": 0,
             "filename": "",
@@ -254,12 +254,12 @@ class ManagerState:
     def browse(self, relative_text: str) -> dict[str, object]:
         usb = self.usb()
         if not usb:
-            raise FileNotFoundError("USB bağlı değil")
+            raise FileNotFoundError("USB drive is not connected")
         relative = safe_relative_path(relative_text)
         mount = Path(usb["MOUNT"])
         directory = contained_path(mount, relative)
         if not directory.is_dir():
-            raise NotADirectoryError("Klasör bulunamadı")
+            raise NotADirectoryError("Folder not found")
         entries: list[dict[str, object]] = []
         with os.scandir(directory) as iterator:
             ordered = sorted(iterator, key=lambda entry: (not entry.is_dir(follow_symlinks=False), entry.name.casefold()))
@@ -288,7 +288,7 @@ class ManagerState:
         relative = safe_relative_path(relative_text)
         directory = contained_path(self.library_root, relative)
         if not directory.is_dir():
-            raise NotADirectoryError("Yerel klasör bulunamadı")
+            raise NotADirectoryError("Local folder not found")
         entries: list[dict[str, object]] = []
         with os.scandir(directory) as iterator:
             ordered = sorted(
@@ -318,7 +318,7 @@ class ManagerState:
     def create_folder(self, parent_text: str, name_text: str) -> str:
         parent = contained_path(self.library_root, safe_relative_path(parent_text))
         if not parent.is_dir():
-            raise NotADirectoryError("Üst klasör bulunamadı")
+            raise NotADirectoryError("Parent folder not found")
         name = safe_entry_name(name_text)
         destination = parent / name
         destination.mkdir(mode=0o755, exist_ok=False)
@@ -327,9 +327,9 @@ class ManagerState:
     def delete_library_entry(self, relative_text: str) -> str:
         relative = safe_relative_path(relative_text)
         if not relative.parts:
-            raise ValueError("Yerel arşivin kökü silinemez")
+            raise ValueError("The local library root cannot be deleted")
         if not self.upload_lock.acquire(blocking=False):
-            raise RuntimeError("Yükleme sürerken dosya silinemez")
+            raise RuntimeError("Files cannot be deleted while an upload is running")
         try:
             target = contained_path(self.library_root, relative)
             if target.is_dir():
@@ -337,7 +337,7 @@ class ManagerState:
             elif target.is_file():
                 target.unlink()
             else:
-                raise FileNotFoundError("Silinecek öğe bulunamadı")
+                raise FileNotFoundError("The item to delete was not found")
             return relative.as_posix()
         finally:
             self.upload_lock.release()
@@ -345,19 +345,19 @@ class ManagerState:
     def store_upload(self, directory_text: str, filename_text: str,
                      stream, length: int) -> dict[str, object]:
         if length <= 0 or length > MAX_UPLOAD_BYTES:
-            raise ValueError("Geçersiz veya çok büyük yükleme")
+            raise ValueError("Invalid or oversized upload")
         filename = safe_entry_name(filename_text)
         if not audio_file(Path(filename)):
-            raise ValueError("Yalnızca desteklenen ses dosyaları yüklenebilir")
+            raise ValueError("Only supported audio files can be uploaded")
         directory = contained_path(
             self.library_root, safe_relative_path(directory_text))
         if not directory.is_dir():
-            raise NotADirectoryError("Hedef klasör bulunamadı")
+            raise NotADirectoryError("Destination folder not found")
         free = shutil.disk_usage(self.library_root).free
         if free < length + 128 * 1024 * 1024:
-            raise OSError("Yerel arşivde yeterli boş alan yok")
+            raise OSError("Not enough free space in the local library")
         if not self.upload_lock.acquire(blocking=False):
-            raise RuntimeError("Başka bir yükleme devam ediyor")
+            raise RuntimeError("Another upload is already running")
 
         job_id = f"{int(time.time())}-{secrets.token_hex(4)}"
         temporary = directory / f".{filename}.zed-upload-{job_id}.partial"
@@ -367,7 +367,7 @@ class ManagerState:
                     "id": job_id,
                     "active": True,
                     "phase": "uploading",
-                    "message": f"{filename} yükleniyor",
+                    "message": f"Uploading {filename}",
                     "bytes_total": length,
                     "bytes_done": 0,
                     "filename": filename,
@@ -378,7 +378,7 @@ class ManagerState:
                 while remaining:
                     chunk = stream.read(min(1024 * 1024, remaining))
                     if not chunk:
-                        raise OSError("Yükleme beklenenden önce kesildi")
+                        raise OSError("Upload ended before all bytes were received")
                     destination_file.write(chunk)
                     written += len(chunk)
                     remaining -= len(chunk)
@@ -400,7 +400,7 @@ class ManagerState:
                 self.upload.update({
                     "active": False,
                     "phase": "complete",
-                    "message": "Dosya zaten vardı" if skipped else "Yükleme tamamlandı",
+                    "message": "File already exists" if skipped else "Upload complete",
                     "bytes_done": length,
                     "path": relative,
                     "skipped": skipped,
@@ -424,20 +424,20 @@ class ManagerState:
     def start_import(self, selections: list[str]) -> str:
         usb = self.usb()
         if not usb:
-            raise FileNotFoundError("USB bağlı değil")
+            raise FileNotFoundError("USB drive is not connected")
         if not selections:
             selections = [""]
         normalized = [safe_relative_path(value) for value in selections]
         with self.lock:
             if bool(self.progress.get("active")):
-                raise RuntimeError("İçe aktarım zaten çalışıyor")
+                raise RuntimeError("An import is already running")
             job_id = f"{int(time.time())}-{secrets.token_hex(4)}"
             self.cancel_event.clear()
             self.progress = {
                 "id": job_id,
                 "active": True,
                 "phase": "scanning",
-                "message": "USB taranıyor",
+                "message": "Scanning USB drive",
                 "files_total": 0,
                 "files_done": 0,
                 "files_copied": 0,
@@ -459,7 +459,7 @@ class ManagerState:
     def cancel(self) -> None:
         with self.lock:
             if bool(self.progress.get("active")):
-                self.progress["message"] = "İptal bekleniyor"
+                self.progress["message"] = "Waiting to cancel"
                 self.cancel_event.set()
                 self._publish_progress_locked()
 
@@ -494,7 +494,7 @@ class ManagerState:
             bytes_total = sum(size for _, _, size in selected_files)
             self._set_progress(
                 phase="copying",
-                message="Parçalar yerel arşive kopyalanıyor",
+                message="Copying tracks to the local library",
                 files_total=len(selected_files),
                 bytes_total=bytes_total,
             )
@@ -504,7 +504,7 @@ class ManagerState:
             errors: list[dict[str, str]] = []
             for index, (source, relative, size) in enumerate(selected_files, start=1):
                 if self.cancel_event.is_set():
-                    self._set_progress(active=False, phase="cancelled", message="İçe aktarım iptal edildi")
+                    self._set_progress(active=False, phase="cancelled", message="Import cancelled")
                     return
                 temporary: Path | None = None
                 try:
@@ -551,21 +551,21 @@ class ManagerState:
             if device_failure:
                 final_phase = "device_error"
                 message = (
-                    "USB okuması güvenlik için durduruldu: art arda 5 donanım "
-                    "I/O hatası. USB kablosunu, portu ve diski kontrol edin"
+                    "USB reading stopped for safety after 5 consecutive hardware "
+                    "I/O errors. Check the USB cable, port and drive"
                 )
             elif failed:
                 final_phase = "complete_with_errors"
                 message = (
-                    f"Aktarım tamamlandı: {copied} kopyalandı, "
-                    f"{skipped} zaten vardı, {failed} USB dosyası okunamadı"
+                    f"Transfer complete: {copied} copied, "
+                    f"{skipped} already existed, {failed} USB files could not be read"
                 )
             elif copied > 0:
                 final_phase = "complete"
-                message = "İçe aktarım tamamlandı; Mixxx kütüphane taraması istendi"
+                message = "Import complete; Mixxx library scan requested"
             else:
                 final_phase = "complete"
-                message = "Seçilen parçaların tümü yerel arşivde zaten mevcut"
+                message = "All selected tracks already exist in the local library"
             self._set_progress(
                 active=False,
                 phase=final_phase,
@@ -594,13 +594,13 @@ class ManagerState:
     def eject(self) -> str:
         with self.lock:
             if bool(self.progress.get("active")):
-                raise RuntimeError("İçe aktarım sürerken USB çıkarılamaz")
+                raise RuntimeError("The USB drive cannot be ejected during an import")
         usb = self.usb()
         if not usb:
-            raise FileNotFoundError("USB bağlı değil")
+            raise FileNotFoundError("USB drive is not connected")
         source = usb.get("SOURCE", "")
         if not source.startswith("/dev/") or any(char.isspace() for char in source):
-            raise ValueError("Geçersiz USB aygıtı")
+            raise ValueError("Invalid USB device")
         result = subprocess.run(
             ["/usr/bin/udisksctl", "unmount", "-b", source],
             capture_output=True,
@@ -609,38 +609,38 @@ class ManagerState:
             check=False,
         )
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "USB ayrılamadı").strip())
-        return (result.stdout or "USB güvenle ayrıldı").strip()
+            raise RuntimeError((result.stderr or result.stdout or "The USB drive could not be safely ejected").strip())
+        return (result.stdout or "USB drive safely ejected").strip()
 
 
 HTML = r"""<!doctype html>
-<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZED Library Manager</title>
 <style>
 :root{color-scheme:dark;--bg:#050708;--panel:#101517;--line:#263034;--cyan:#27e8e0;--amber:#ffb020;--red:#ff4d43;--muted:#8fa0a6}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -20%,#193236 0,#050708 45%);font:15px system-ui,sans-serif;color:#f5fbfc;min-height:100vh}.wrap{max-width:920px;margin:auto;padding:24px}.brand{letter-spacing:.32em;font-weight:800;font-size:32px}.tag{color:var(--cyan);font-size:12px;letter-spacing:.18em;margin-top:4px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:22px}.card{background:rgba(16,21,23,.94);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 16px 40px #0008}.wide{grid-column:1/-1}.label{font-size:11px;color:var(--muted);letter-spacing:.14em}.value{font-size:21px;font-weight:650;margin-top:5px}.ok{color:var(--cyan)}.warn{color:var(--amber)}button{border:1px solid #3c4b50;background:#172024;color:#fff;border-radius:7px;padding:10px 14px;font-weight:650;cursor:pointer}button.primary{border-color:#168a87;background:#0b4544;color:#bffffc}button.danger{border-color:#88322e;color:#ffb7b3}button:disabled{opacity:.35;cursor:not-allowed}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.crumb{color:var(--cyan);margin:14px 0;min-height:22px}.entries{border:1px solid var(--line);border-radius:8px;overflow:hidden}.entry{display:grid;grid-template-columns:32px 1fr auto;align-items:center;gap:9px;padding:10px 12px;border-bottom:1px solid #20282b}.entry:last-child{border:0}.entry:hover{background:#122326}.entry input{width:18px;height:18px}.entry .open{background:none;border:0;padding:0;text-align:left;font-weight:600}.drop{border:1px dashed #2b6d6a;border-radius:8px;padding:13px;text-align:center;color:var(--muted);margin-top:12px}.drop.active{border-color:var(--cyan);background:#0b3333;color:#c9fffc}.small{font-size:12px;color:var(--muted)}progress{width:100%;height:12px;accent-color:var(--cyan);margin-top:12px}.statusline{display:flex;justify-content:space-between;gap:12px;margin-top:8px}.toast{position:fixed;right:18px;bottom:18px;background:#142326;border:1px solid #2c7773;padding:12px 16px;border-radius:8px;display:none;max-width:420px}@media(max-width:650px){.wrap{padding:16px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.brand{font-size:27px}}
 </style></head><body><main class="wrap"><div class="brand">ZED</div><div class="tag">OPEN DJ SYSTEM · LIBRARY MANAGER</div>
-<section class="grid"><article class="card"><div class="label">USB PLAYER</div><div id="usb" class="value">Kontrol ediliyor…</div><div id="usbmeta" class="small"></div></article><article class="card"><div class="label">YEREL ARŞİV</div><div id="disk" class="value">—</div><div id="library" class="small"></div></article>
-<article class="card wide"><div class="label">YEREL ARŞİV DOSYALARI</div><div id="localCrumb" class="crumb">/</div><div class="toolbar"><button id="localUp">Üst klasör</button><button id="localSelectAll">Tümünü seç</button><button id="newFolder">Yeni klasör</button><button id="chooseFiles" class="primary">Parça yükle</button><button id="deleteLocal" class="danger">Seçilenleri sil</button><button id="rescan">Mixxx'i tara</button><button id="purgeMissing" class="danger">Eksik kayıtları temizle</button><input id="fileInput" type="file" multiple accept=".aac,.aif,.aiff,.alac,.flac,.m4a,.mp3,.mp4,.ogg,.opus,.wav,.wave,.wv" hidden></div><div id="dropZone" class="drop">Ses dosyalarını bu alana sürükleyip bırakın</div><div id="localEntries" class="entries" style="margin-top:12px"></div></article>
-<article class="card wide"><div class="label">USB İÇERİĞİ</div><div id="crumb" class="crumb">/</div><div class="toolbar"><button id="up">Üst klasör</button><button id="selectAll">Tümünü seç</button><button id="import" class="primary">Seçilenleri içe aktar</button><button id="eject" class="danger">USB'yi güvenle çıkar</button></div><div id="entries" class="entries" style="margin-top:12px"></div></article>
-<article class="card wide"><div class="label">AKTARIM DURUMU</div><div id="message" class="value">Hazır</div><progress id="progress" value="0" max="1"></progress><div class="statusline"><span id="counts" class="small"></span><span id="mixxx" class="small"></span></div><div class="toolbar"><button id="cancel">Aktarımı iptal et</button></div></article></section></main><div id="toast" class="toast"></div>
+<section class="grid"><article class="card"><div class="label">USB PLAYER</div><div id="usb" class="value">Checking…</div><div id="usbmeta" class="small"></div></article><article class="card"><div class="label">LOCAL LIBRARY</div><div id="disk" class="value">—</div><div id="library" class="small"></div></article>
+<article class="card wide"><div class="label">LOCAL LIBRARY FILES</div><div id="localCrumb" class="crumb">/</div><div class="toolbar"><button id="localUp">Parent folder</button><button id="localSelectAll">Select all</button><button id="newFolder">New folder</button><button id="chooseFiles" class="primary">Upload tracks</button><button id="deleteLocal" class="danger">Delete selected</button><button id="rescan">Rescan Mixxx</button><button id="purgeMissing" class="danger">Purge missing records</button><input id="fileInput" type="file" multiple accept=".aac,.aif,.aiff,.alac,.flac,.m4a,.mp3,.mp4,.ogg,.opus,.wav,.wave,.wv" hidden></div><div id="dropZone" class="drop">Drag and drop audio files here</div><div id="localEntries" class="entries" style="margin-top:12px"></div></article>
+<article class="card wide"><div class="label">USB CONTENTS</div><div id="crumb" class="crumb">/</div><div class="toolbar"><button id="up">Parent folder</button><button id="selectAll">Select all</button><button id="import" class="primary">Import selected</button><button id="eject" class="danger">Safely eject USB</button></div><div id="entries" class="entries" style="margin-top:12px"></div></article>
+<article class="card wide"><div class="label">TRANSFER STATUS</div><div id="message" class="value">Ready</div><progress id="progress" value="0" max="1"></progress><div class="statusline"><span id="counts" class="small"></span><span id="mixxx" class="small"></span></div><div class="toolbar"><button id="cancel">Cancel transfer</button></div></article></section></main><div id="toast" class="toast"></div>
 <script>
 const CSRF="__CSRF__";let path="",localPath="",snapshot=null;const $=id=>document.getElementById(id);const fmt=n=>{if(!n)return"0 B";const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i?1:0)+" "+u[i]};
 function toast(t){$("toast").textContent=t;$("toast").style.display="block";setTimeout(()=>$("toast").style.display="none",3500)}
-async function api(url,opt={}){opt.headers={...(opt.headers||{}),"X-ZED-CSRF":CSRF};const r=await fetch(url,opt);const j=await r.json();if(!r.ok)throw Error(j.error||"İşlem başarısız");return j}
-async function refresh(){try{snapshot=await api("/api/status");const u=snapshot.usb;$("usb").textContent=u.present?u.label:"USB bağlı değil";$("usb").className="value "+(u.present?"ok":"warn");$("usbmeta").textContent=u.present?u.source+" · "+u.fstype:"";$("disk").textContent=fmt(snapshot.disk.free)+" boş";$("library").textContent=snapshot.library_root;const imp=snapshot.import,up=snapshot.upload,p=up.active?up:imp;$("message").textContent=p.message||"Hazır";$("message").className="value "+(["complete_with_errors","device_error","error"].includes(p.phase)?"warn":"");$("progress").max=Math.max(1,p.bytes_total||p.files_total||1);$("progress").value=p.bytes_total?p.bytes_done:(p.files_done||0);$("counts").textContent=up.active?(up.filename+" · "+fmt(up.bytes_done||0)+" / "+fmt(up.bytes_total||0)):((imp.files_done||0)+" / "+(imp.files_total||0)+" parça · "+fmt(imp.bytes_done||0)+(imp.files_failed?" · "+imp.files_failed+" okunamadı":""));$("mixxx").textContent=snapshot.mixxx.status?"Mixxx: "+snapshot.mixxx.status:"";$("cancel").disabled=!imp.active;$("import").disabled=!u.present||imp.active;$("eject").disabled=!u.present||imp.active;$("chooseFiles").disabled=up.active;$("deleteLocal").disabled=up.active;if(!u.present){$("entries").innerHTML='<div class="entry">Okunabilir DJ USB aygıtı bekleniyor</div>'}}catch(e){toast(e.message)}}
-async function browse(next=path){try{const data=await api("/api/browse?path="+encodeURIComponent(next));path=data.path;$("crumb").textContent="/"+path;$("up").disabled=!path;$("entries").innerHTML=data.entries.map((e,i)=>`<div class="entry"><input type="checkbox" data-path="${encodeURIComponent(e.path)}"><button class="open" data-open="${e.directory?encodeURIComponent(e.path):""}">${e.directory?"▸ ":"♪ "}${esc(e.name)}</button><span class="small">${e.directory?"KLASÖR":fmt(e.size)}</span></div>`).join("")||'<div class="entry">Bu klasörde desteklenen parça yok</div>';document.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>b.dataset.open&&browse(decodeURIComponent(b.dataset.open)))}catch(e){toast(e.message)}}
-async function localBrowse(next=localPath){try{const data=await api("/api/library?path="+encodeURIComponent(next));localPath=data.path;$("localCrumb").textContent="/"+localPath;$("localUp").disabled=!localPath;$("localEntries").innerHTML=data.entries.map(e=>`<div class="entry"><input type="checkbox" data-local="${encodeURIComponent(e.path)}"><button class="open" data-local-open="${e.directory?encodeURIComponent(e.path):""}">${e.directory?"▸ ":"♪ "}${esc(e.name)}</button><span class="small">${e.directory?"KLASÖR":fmt(e.size)}</span></div>`).join("")||'<div class="entry">Bu klasör boş</div>';document.querySelectorAll("[data-local-open]").forEach(b=>b.onclick=()=>b.dataset.localOpen&&localBrowse(decodeURIComponent(b.dataset.localOpen)))}catch(e){toast(e.message)}}
+async function api(url,opt={}){opt.headers={...(opt.headers||{}),"X-ZED-CSRF":CSRF};const r=await fetch(url,opt);const j=await r.json();if(!r.ok)throw Error(j.error||"Operation failed");return j}
+async function refresh(){try{snapshot=await api("/api/status");const u=snapshot.usb;$("usb").textContent=u.present?u.label:"USB drive not connected";$("usb").className="value "+(u.present?"ok":"warn");$("usbmeta").textContent=u.present?u.source+" · "+u.fstype:"";$("disk").textContent=fmt(snapshot.disk.free)+" free";$("library").textContent=snapshot.library_root;const imp=snapshot.import,up=snapshot.upload,p=up.active?up:imp;$("message").textContent=p.message||"Ready";$("message").className="value "+(["complete_with_errors","device_error","error"].includes(p.phase)?"warn":"");$("progress").max=Math.max(1,p.bytes_total||p.files_total||1);$("progress").value=p.bytes_total?p.bytes_done:(p.files_done||0);$("counts").textContent=up.active?(up.filename+" · "+fmt(up.bytes_done||0)+" / "+fmt(up.bytes_total||0)):((imp.files_done||0)+" / "+(imp.files_total||0)+" tracks · "+fmt(imp.bytes_done||0)+(imp.files_failed?" · "+imp.files_failed+" unreadable":""));$("mixxx").textContent=snapshot.mixxx.status?"Mixxx: "+snapshot.mixxx.status:"";$("cancel").disabled=!imp.active;$("import").disabled=!u.present||imp.active;$("eject").disabled=!u.present||imp.active;$("chooseFiles").disabled=up.active;$("deleteLocal").disabled=up.active;if(!u.present){$("entries").innerHTML='<div class="entry">Waiting for a readable DJ USB drive</div>'}}catch(e){toast(e.message)}}
+async function browse(next=path){try{const data=await api("/api/browse?path="+encodeURIComponent(next));path=data.path;$("crumb").textContent="/"+path;$("up").disabled=!path;$("entries").innerHTML=data.entries.map((e,i)=>`<div class="entry"><input type="checkbox" data-path="${encodeURIComponent(e.path)}"><button class="open" data-open="${e.directory?encodeURIComponent(e.path):""}">${e.directory?"▸ ":"♪ "}${esc(e.name)}</button><span class="small">${e.directory?"FOLDER":fmt(e.size)}</span></div>`).join("")||'<div class="entry">No supported tracks in this folder</div>';document.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>b.dataset.open&&browse(decodeURIComponent(b.dataset.open)))}catch(e){toast(e.message)}}
+async function localBrowse(next=localPath){try{const data=await api("/api/library?path="+encodeURIComponent(next));localPath=data.path;$("localCrumb").textContent="/"+localPath;$("localUp").disabled=!localPath;$("localEntries").innerHTML=data.entries.map(e=>`<div class="entry"><input type="checkbox" data-local="${encodeURIComponent(e.path)}"><button class="open" data-local-open="${e.directory?encodeURIComponent(e.path):""}">${e.directory?"▸ ":"♪ "}${esc(e.name)}</button><span class="small">${e.directory?"FOLDER":fmt(e.size)}</span></div>`).join("")||'<div class="entry">This folder is empty</div>';document.querySelectorAll("[data-local-open]").forEach(b=>b.onclick=()=>b.dataset.localOpen&&localBrowse(decodeURIComponent(b.dataset.localOpen)))}catch(e){toast(e.message)}}
 function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
 $('localUp').onclick=()=>localBrowse(localPath.split('/').slice(0,-1).join('/'));$('localSelectAll').onclick=()=>document.querySelectorAll('#localEntries input[type="checkbox"]').forEach(c=>c.checked=true);
-$('newFolder').onclick=async()=>{const name=prompt('Yeni klasör adı:');if(!name)return;try{await api('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:localPath,name})});await api('/api/rescan',{method:'POST'});await localBrowse();toast('Klasör oluşturuldu; Mixxx listesi güncelleniyor')}catch(e){toast(e.message)}};
-async function uploadFiles(files){files=[...files];if(!files.length)return;let done=0,failure='';try{for(const file of files){await api('/api/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-ZED-Path':encodeURIComponent(localPath),'X-ZED-Filename':encodeURIComponent(file.name)},body:file});done++;await refresh()}}catch(e){failure=e.message}finally{if(done)await api('/api/rescan',{method:'POST'}).catch(e=>failure=failure||e.message);await localBrowse();$('fileInput').value='';refresh();toast(failure?(done+' dosya yüklendi; sonra durdu: '+failure):(done+' parça yüklendi; Mixxx taraması başlatıldı'))}}
+$('newFolder').onclick=async()=>{const name=prompt('New folder name:');if(!name)return;try{await api('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:localPath,name})});await api('/api/rescan',{method:'POST'});await localBrowse();toast('Folder created; updating the Mixxx list')}catch(e){toast(e.message)}};
+async function uploadFiles(files){files=[...files];if(!files.length)return;let done=0,failure='';try{for(const file of files){await api('/api/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-ZED-Path':encodeURIComponent(localPath),'X-ZED-Filename':encodeURIComponent(file.name)},body:file});done++;await refresh()}}catch(e){failure=e.message}finally{if(done)await api('/api/rescan',{method:'POST'}).catch(e=>failure=failure||e.message);await localBrowse();$('fileInput').value='';refresh();toast(failure?(done+' files uploaded, then stopped: '+failure):(done+' tracks uploaded; Mixxx scan started'))}}
 $('chooseFiles').onclick=()=>$('fileInput').click();$('fileInput').onchange=e=>uploadFiles(e.target.files);const dz=$('dropZone');['dragenter','dragover'].forEach(n=>dz.addEventListener(n,e=>{e.preventDefault();dz.classList.add('active')}));['dragleave','drop'].forEach(n=>dz.addEventListener(n,e=>{e.preventDefault();dz.classList.remove('active')}));dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));
-$('deleteLocal').onclick=async()=>{const paths=[...document.querySelectorAll('#localEntries input:checked')].map(c=>decodeURIComponent(c.dataset.local));if(!paths.length){toast('Silinecek dosya veya klasörü seçin');return}if(!confirm(paths.length+' seçim ve klasör içerikleri kalıcı olarak silinsin mi?'))return;let done=0,failure='';try{for(const selected of paths){await api('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:selected,confirm:selected})});done++}}catch(e){failure=e.message}finally{if(done)await api('/api/rescan',{method:'POST'}).catch(e=>failure=failure||e.message);await localBrowse();toast(failure?(done+' seçim silindi; sonra durdu: '+failure):'Seçilenler silindi; Mixxx taraması başlatıldı')}};
-$('rescan').onclick=async()=>{try{await api('/api/rescan',{method:'POST'});toast('Mixxx kütüphane taraması başlatıldı')}catch(e){toast(e.message)}};
-$('purgeMissing').onclick=async()=>{if(!confirm('Fiziksel dosyası bulunmayan tüm kayıtlar playlist, crate ve Mixxx veritabanından silinsin mi? Mevcut ses dosyalarına dokunulmaz.'))return;try{await api('/api/purge-missing',{method:'POST'});toast('Eksik kayıt taraması ve temizliği başlatıldı')}catch(e){toast(e.message)}};
+$('deleteLocal').onclick=async()=>{const paths=[...document.querySelectorAll('#localEntries input:checked')].map(c=>decodeURIComponent(c.dataset.local));if(!paths.length){toast('Select a file or folder to delete');return}if(!confirm('Permanently delete '+paths.length+' selections and all contents of selected folders?'))return;let done=0,failure='';try{for(const selected of paths){await api('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:selected,confirm:selected})});done++}}catch(e){failure=e.message}finally{if(done)await api('/api/rescan',{method:'POST'}).catch(e=>failure=failure||e.message);await localBrowse();toast(failure?(done+' selections deleted, then stopped: '+failure):'Selected items deleted; Mixxx scan started')}};
+$('rescan').onclick=async()=>{try{await api('/api/rescan',{method:'POST'});toast('Mixxx library scan started')}catch(e){toast(e.message)}};
+$('purgeMissing').onclick=async()=>{if(!confirm('Remove every record whose physical file is missing from playlists, crates and the Mixxx database? Existing audio files will not be touched.'))return;try{await api('/api/purge-missing',{method:'POST'});toast('Missing-record scan and cleanup started')}catch(e){toast(e.message)}};
 $("up").onclick=()=>browse(path.split("/").slice(0,-1).join("/"));$("selectAll").onclick=()=>document.querySelectorAll('#entries input[type="checkbox"]').forEach(c=>c.checked=true);
-$("import").onclick=async()=>{const paths=[...document.querySelectorAll('#entries input:checked')].map(c=>decodeURIComponent(c.dataset.path));if(!paths.length){toast("En az bir klasör veya parça seçin");return}if(!confirm(paths.length+" seçim yerel arşive aktarılsın mı?"))return;try{await api("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths})});toast("İçe aktarım başladı");refresh()}catch(e){toast(e.message)}};
-$("cancel").onclick=async()=>{try{await api("/api/cancel",{method:"POST"});toast("İptal istendi")}catch(e){toast(e.message)}};$("eject").onclick=async()=>{if(!confirm("USB güvenle ayrılsın mı?"))return;try{const j=await api("/api/eject",{method:"POST"});toast(j.message);path="";refresh()}catch(e){toast(e.message)}};
+$("import").onclick=async()=>{const paths=[...document.querySelectorAll('#entries input:checked')].map(c=>decodeURIComponent(c.dataset.path));if(!paths.length){toast("Select at least one folder or track");return}if(!confirm("Import "+paths.length+" selections into the local library?"))return;try{await api("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths})});toast("Import started");refresh()}catch(e){toast(e.message)}};
+$("cancel").onclick=async()=>{try{await api("/api/cancel",{method:"POST"});toast("Cancellation requested")}catch(e){toast(e.message)}};$("eject").onclick=async()=>{if(!confirm("Safely eject the USB drive?"))return;try{const j=await api("/api/eject",{method:"POST"});toast(j.message);path="";refresh()}catch(e){toast(e.message)}};
 localBrowse();refresh().then(()=>snapshot?.usb.present&&browse(""));setInterval(refresh,1000);
 </script></body></html>"""
 
@@ -672,7 +672,7 @@ class ZedHandler(BaseHTTPRequestHandler):
         return bool(separator) and username == "zed" and secrets.compare_digest(password, self.access_key)
 
     def _request_authentication(self) -> None:
-        data = "Kimlik doğrulama gerekli".encode("utf-8")
+        data = "Authentication required".encode("utf-8")
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="ZED Open DJ System", charset="UTF-8"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -706,9 +706,9 @@ class ZedHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as error:
-            raise ValueError("Geçersiz istek") from error
+            raise ValueError("Invalid request") from error
         if length <= 0 or length > MAX_REQUEST_BYTES:
-            raise ValueError("Geçersiz istek boyutu")
+            raise ValueError("Invalid request size")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_GET(self) -> None:
@@ -738,14 +738,14 @@ class ZedHandler(BaseHTTPRequestHandler):
             except Exception as error:
                 self._error(error, HTTPStatus.NOT_FOUND)
             return
-        self._json({"error": "Bulunamadı"}, HTTPStatus.NOT_FOUND)
+        self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         if not self._authenticated():
             self._request_authentication()
             return
         if not self._csrf_ok():
-            self._json({"error": "Geçersiz güvenlik anahtarı"}, HTTPStatus.FORBIDDEN)
+            self._json({"error": "Invalid security token"}, HTTPStatus.FORBIDDEN)
             return
         parsed = urlsplit(self.path)
         try:
@@ -753,7 +753,7 @@ class ZedHandler(BaseHTTPRequestHandler):
                 body = self._body()
                 paths = body.get("paths")
                 if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
-                    raise ValueError("Geçersiz seçim")
+                    raise ValueError("Invalid selection")
                 self._json({"id": self.manager.start_import(paths)}, HTTPStatus.ACCEPTED)
                 return
             if parsed.path == "/api/cancel":
@@ -768,7 +768,7 @@ class ZedHandler(BaseHTTPRequestHandler):
                 path = body.get("path")
                 name = body.get("name")
                 if not isinstance(path, str) or not isinstance(name, str):
-                    raise ValueError("Geçersiz klasör isteği")
+                    raise ValueError("Invalid folder request")
                 self._json({"path": self.manager.create_folder(path, name)}, HTTPStatus.CREATED)
                 return
             if parsed.path == "/api/delete":
@@ -777,14 +777,14 @@ class ZedHandler(BaseHTTPRequestHandler):
                 confirmation = body.get("confirm")
                 if (not isinstance(path, str) or not isinstance(confirmation, str) or
                         not path or not secrets.compare_digest(path, confirmation)):
-                    raise ValueError("Silme onayı seçilen yolla eşleşmiyor")
+                    raise ValueError("Delete confirmation does not match the selected path")
                 self._json({"path": self.manager.delete_library_entry(path)})
                 return
             if parsed.path == "/api/upload":
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError as error:
-                    raise ValueError("Geçersiz yükleme boyutu") from error
+                    raise ValueError("Invalid upload size") from error
                 directory = unquote(self.headers.get("X-ZED-Path", ""))
                 filename = unquote(self.headers.get("X-ZED-Filename", ""))
                 self._json(
@@ -798,7 +798,7 @@ class ZedHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/purge-missing":
                 self._json({"id": self.manager.request_mixxx_purge_missing()}, HTTPStatus.ACCEPTED)
                 return
-            self._json({"error": "Bulunamadı"}, HTTPStatus.NOT_FOUND)
+            self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except FileNotFoundError as error:
             self._error(error, HTTPStatus.NOT_FOUND)
         except RuntimeError as error:

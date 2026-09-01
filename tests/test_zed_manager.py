@@ -41,7 +41,25 @@ def main():
     assert "ZED / " in source
     assert "ProtectSystem=strict" in service
     assert "IOSchedulingClass=idle" in service
-    assert "_authenticated" in MODULE_PATH.read_text(encoding="utf-8")
+    manager_source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "_authenticated" in manager_source
+    assert '<html lang="en">' in manager_source
+    for label in (
+        "LOCAL LIBRARY FILES",
+        "Upload tracks",
+        "Purge missing records",
+        "TRANSFER STATUS",
+        "Authentication required",
+    ):
+        assert label in manager_source, label
+    for obsolete_turkish_label in (
+        "YEREL ARŞİV",
+        "Parça yükle",
+        "Eksik kayıtları temizle",
+        "AKTARIM DURUMU",
+        "Kimlik doğrulama gerekli",
+    ):
+        assert obsolete_turkish_label not in manager_source, obsolete_turkish_label
 
     with tempfile.TemporaryDirectory() as key_directory:
         key_path = Path(key_directory) / "access-key"
@@ -190,7 +208,7 @@ def main():
         assert stopped["phase"] == "device_error", stopped
         assert stopped["files_done"] == 5, stopped
         assert stopped["files_failed"] == 5, stopped
-        assert "art arda 5" in stopped["message"], stopped
+        assert "5 consecutive hardware" in stopped["message"], stopped
 
     print("ZED_MANAGER_TEST_OK")
 
