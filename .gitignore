@@ -13,3 +13,12 @@ __pycache__/
 .vscode/
 .idea/
 tmp/
+
+# Local boot/display verification captures; curated README images are tracked
+# explicitly under docs/ with stable names.
+docs/d2-player-2-framebuffer.png
+docs/d2-startup-preview.png
+docs/zed-after-boot.png
+docs/zed-after-eeprom.png
+docs/zed-boot-preview.png
+docs/zed-mixxx-handoff-preview.png
