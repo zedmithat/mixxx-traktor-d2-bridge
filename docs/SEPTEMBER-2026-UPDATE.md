@@ -36,7 +36,7 @@ and Filter using Mixxx effects. They do not contain another DJ product's DSP.
 
 ## First setup and audio selection
 
-![Turkish first-setup preview with language, country and time-zone selection](images/setup-turkish-20260913.png)
+![English first-setup preview with language, country and time-zone selection](images/setup-english.png)
 
 This is the existing offline setup-preview capture, not a new physical-device
 test. Setup provides English/Turkish, country/time zone, Wi-Fi progression,

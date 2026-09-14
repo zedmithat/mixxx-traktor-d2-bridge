@@ -33,9 +33,9 @@ image download has not been published in this repository.
 
 ![Touch FX Flanger, offline PyQt preview with simulated MIDI](docs/images/touchfx-flanger-20260913.png)
 
-### Turkish first setup
+### English first setup
 
-![Turkish first-setup offline preview](docs/images/setup-turkish-20260913.png)
+![English first-setup offline preview](docs/images/setup-english.png)
 
 These are actual offline UI captures, not live Pi audio-test screenshots or
 complete current-player screenshots. Touch FX captures retain their dry-run
