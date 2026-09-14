@@ -1,0 +1,17 @@
+[Unit]
+Description=ZED Touch FX virtual MIDI and resident pad
+After=sway-session.service
+PartOf=graphical-session.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+Environment=QT_QPA_PLATFORM=wayland
+Environment=QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+ExecStart=/usr/bin/python3 -B /usr/local/lib/zed-touch-fx/touchfx.py --zed-session
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=5
+NoNewPrivileges=true
+UMask=0077
