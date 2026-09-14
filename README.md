@@ -39,9 +39,35 @@ image download has not been published in this repository.
 
 These are actual offline UI captures, not live Pi audio-test screenshots or
 complete current-player screenshots. Touch FX captures retain their dry-run
-label. The older player captures below document earlier skin states.
+label. Current hardware photos follow; earlier captures are archived separately.
 
-## Screenshots
+## Current ZED skin and D2 hardware
+
+Owner-supplied photographs of the running personal installation with tracks
+loaded. These are camera photos, not direct framebuffer captures. D2 photos
+are rotated for readability; their screen contents are unchanged.
+
+### ZED two-deck main screen
+
+![Current ZED skin with loaded tracks, cover art, Touch FX entry and per-deck FX controls](docs/images/zed-main-owner.png)
+
+### D2 — Deck A
+
+![Current D2 Deck A with Yonke loaded, waveform, Camelot key, loop, remaining time and BPM](docs/images/d2-deck-a-owner.png)
+
+### D2 — Deck B
+
+![Current D2 Deck B with Mirrors loaded, waveform overview, pitch and BPM](docs/images/d2-deck-b-owner.png)
+
+The updated player layout retains two decks and external mixing. The main
+screen shows cover art beside the deck selector, stacked waveforms and the
+Touch FX entry. The D2 photos show the current waveform layout, deck identity,
+Camelot key, loop length, remaining time, pitch and BPM readouts.
+
+## Earlier screenshots
+
+<details>
+<summary>Previous skin, D2 player/browser and development captures</summary>
 
 ### Traktor D2 player
 
@@ -80,6 +106,8 @@ toolbar or the D2 Browse `R1` menu.
 ![D2 deck-playing load rejection](docs/d2-load-reject-preview.png)
 
 ![D2 offline-track feedback](docs/d2-track-offline-preview.png)
+
+</details>
 
 ## Current features
 

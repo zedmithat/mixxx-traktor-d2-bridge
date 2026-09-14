@@ -5,6 +5,18 @@ It is not an OS download announcement. A verified local delivery package now
 contains the owner-accepted clean image, corresponding sources and notices.
 The personal NVMe remains separate and has not been uploaded.
 
+## Current skin and D2 hardware photos
+
+Owner-supplied photos show the personal installation with tracks loaded.
+These are camera photographs, not direct framebuffer captures; the D2 photos
+are rotated for readability without changing their screen contents.
+
+![Current ZED two-deck main screen with cover art and Touch FX entry](images/zed-main-owner.png)
+
+![Current D2 Deck A with a loaded track](images/d2-deck-a-owner.png)
+
+![Current D2 Deck B with a loaded track](images/d2-deck-b-owner.png)
+
 ## Touch FX
 
 The [current application, mappings, integration and source tests](../integrations/touch-fx-source/README.md)
