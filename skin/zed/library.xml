@@ -50,9 +50,18 @@
                 <Children>
                   <Label>
                     <ObjectName>SmartListsTitle</ObjectName>
-                    <Size>92f,34f</Size>
+                    <Size>112f,34f</Size>
                     <Text>SMART LISTS</Text>
                   </Label>
+                  <PushButton>
+                    <ObjectName>SmartRangeButton</ObjectName>
+                    <Size>86f,34f</Size>
+                    <NumberStates>3</NumberStates>
+                    <State><Number>0</Number><Text>BPM ±2%</Text></State>
+                    <State><Number>1</Number><Text>BPM ±4%</Text></State>
+                    <State><Number>2</Number><Text>BPM ±8%</Text></State>
+                    <Connection><ConfigKey>[Library],smart_bpm_range</ConfigKey></Connection>
+                  </PushButton>
                   <PushButton>
                     <ObjectName>SmartPresetButton</ObjectName>
                     <Size>1me,34f</Size>

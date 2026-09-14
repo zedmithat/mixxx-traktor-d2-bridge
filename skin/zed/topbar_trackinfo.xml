@@ -1,0 +1,57 @@
+<Template>
+  <WidgetGroup>
+    <ObjectName>TrackMetadata</ObjectName>
+    <Layout>horizontal</Layout>
+    <Size>me,60f</Size>
+    <Children>
+      <WidgetGroup>
+        <ObjectName>TrackInfo</ObjectName>
+        <Layout>vertical</Layout>
+        <Size>me,60f</Size>
+        <Children>
+          <TrackProperty>
+            <ObjectName>TitleText</ObjectName>
+            <Size>me,30f</Size>
+            <TooltipId>track_title</TooltipId>
+            <Property>titleInfo</Property>
+            <Alignment>Left</Alignment>
+            <Elide>right</Elide>
+            <Channel><Variable name="channel"/></Channel>
+            <Connection>
+              <ConfigKey>[Channel<Variable name="channel"/>],track_loaded</ConfigKey>
+              <BindProperty>highlight</BindProperty>
+            </Connection>
+          </TrackProperty>
+          <WidgetGroup>
+            <ObjectName>TrackSubInfo</ObjectName>
+            <Layout>horizontal</Layout>
+            <Size>me,30f</Size>
+            <LayoutAlignment>left</LayoutAlignment>
+            <Children>
+              <TrackProperty>
+                <ObjectName>ArtistText</ObjectName>
+                <Size>me,30f</Size>
+                <TooltipId>track_artist</TooltipId>
+                <Property>artist</Property>
+                <Elide>right</Elide>
+                <Channel><Variable name="channel"/></Channel>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],track_loaded</ConfigKey>
+                  <BindProperty>highlight</BindProperty>
+                </Connection>
+              </TrackProperty>
+              <TrackProperty>
+                <ObjectName>DurationText</ObjectName>
+                <Size>me,30f</Size>
+                <TooltipId>track_duration</TooltipId>
+                <Alignment>Left</Alignment>
+                <Property>durationTextSeconds</Property>
+                <Channel><Variable name="channel"/></Channel>
+              </TrackProperty>
+            </Children>
+          </WidgetGroup>
+        </Children>
+      </WidgetGroup>
+    </Children>
+  </WidgetGroup>
+</Template>

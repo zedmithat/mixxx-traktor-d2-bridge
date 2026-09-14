@@ -206,6 +206,21 @@ def main() -> int:
             + ", ".join(present_forbidden)
         )
 
+    # Enabled state is communicated by the existing cyan/amber styling. Keep
+    # the compact button captions stable so ON/OFF words do not consume space.
+    slot_text = (SKIN / "deck_fx_slot.xml").read_text(encoding="utf-8")
+    route_text = (SKIN / "deck_fx.xml").read_text(encoding="utf-8")
+    legacy_text = (SKIN / "effect.xml").read_text(encoding="utf-8")
+    for source_name, text in (
+        ("deck_fx_slot.xml", slot_text),
+        ("deck_fx.xml", route_text),
+        ("effect.xml", legacy_text),
+    ):
+        if re.search(r"<Text>[^<]*(?:ON|OFF|Active)[^<]*</Text>", text, re.I):
+            raise AssertionError(
+                f"{source_name}: FX toggle caption must not contain ON/OFF state text"
+            )
+
     malformed = sorted(
         (value, source)
         for value, source in expansion.config_keys

@@ -18,11 +18,11 @@
 
                 <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpBackward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>⏪ 4</Text>
+                <Text>4</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_4_backward</ConfigKey>
@@ -33,11 +33,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpForward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>4 ⏩</Text>
+                <Text>4</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_4_forward</ConfigKey>
@@ -48,11 +48,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpBackward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>⏪ 8</Text>
+                <Text>8</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_8_backward</ConfigKey>
@@ -63,11 +63,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpForward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>8 ⏩</Text>
+                <Text>8</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_8_forward</ConfigKey>
@@ -78,11 +78,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpBackward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>⏪ 16</Text>
+                <Text>16</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_16_backward</ConfigKey>
@@ -93,11 +93,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpForward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>16 ⏩</Text>
+                <Text>16</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_16_forward</ConfigKey>
@@ -108,11 +108,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpBackward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>⏪ 32</Text>
+                <Text>32</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_32_backward</ConfigKey>
@@ -123,11 +123,11 @@
 
                  <PushButton>
                 <NumberStates>1</NumberStates>
-                <ObjectName>HotCue</ObjectName>
+                <ObjectName>BeatJumpForward</ObjectName>
                 <Size>95f,75f</Size>
                 <State
                 ><Number>0</Number>
-                <Text>32 ⏩</Text>
+                <Text>32</Text>
                 </State>
                 <Connection>
                 <ConfigKey>[Channel1],beatjump_32_forward</ConfigKey>

@@ -25,11 +25,11 @@
             <NumberStates>2</NumberStates>
             <State>
               <Number>0</Number>
-              <Text>FX <Variable name="effect"/> OFF</Text>
+              <Text>FX <Variable name="effect"/></Text>
             </State>
             <State>
               <Number>1</Number>
-              <Text>FX <Variable name="effect"/> ON</Text>
+              <Text>FX <Variable name="effect"/></Text>
             </State>
             <Connection>
               <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>],enabled</ConfigKey>

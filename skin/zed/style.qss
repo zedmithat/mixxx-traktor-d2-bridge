@@ -16,6 +16,14 @@ White: #e5e6ea
   background-color: #000;
 }
 
+/* Qt6 WGLWidget embeds an auto-filled QWidget window container. Give that
+   container a black palette before its native GL surface becomes exposed.
+   Styling only the outer page does not prevent the default #efefef flash. */
+#Waveforms QWidget {
+  background-color: #000000;
+  background-image: none;
+}
+
 *{
   font-family: 'Helvetica Neue', sans-serif;
 }
@@ -457,7 +465,6 @@ WPushButton[value="1"] {
   selection-color: #fff;
   font-size:18px;
   font-weight:300;
-  row-height:50px;
 }
 
 #LibraryWrapper WLibrarySidebar {
@@ -524,7 +531,7 @@ WLabel {
   padding-left: 8px;
 }
 
-#SmartPresetButton {
+#SmartPresetButton, #SmartRangeButton {
   background-color: #181818;
   color: #e5e6ea;
   border: 0;
@@ -536,7 +543,7 @@ WLabel {
   padding: 2px 5px;
 }
 
-#SmartPresetButton:pressed {
+#SmartPresetButton:pressed, #SmartRangeButton:pressed {
   background-color: #164853;
   color: #ffffff;
   border-bottom: 2px solid #50e6ff;
@@ -671,51 +678,89 @@ WBeatSpinBox::up-button {
 }
 
 
-#HotCues WPushButton[value="0"], #KeyShift WPushButton[value="0"], #KeyShiftInfo, #Beatloop WPushButton[value="0"], #Stems WPushButton[value="0"]{
-background-image: url(skin:icons/button.png);
-background-repeat: repeat-xy;
-font-weight:400;
+/* The five performance pages share one visual surface.  Functional state is
+   still communicated by the active cyan outline, not by a different page
+   texture. */
+#HotCuePanel,
+#KeyShiftPanel,
+#HotCues,
+#Beatloop,
+#KeyShiftFunction,
+#Stems {
+  background-color: #0d1116;
 }
 
-
-
-
-#Beatloop WPushButton{
-  border: 2px solid #f87021;
-  font:25px;
-  font-weight:400;
+#HotCues WPushButton,
+#Beatloop WPushButton,
+#KeyShift WPushButton,
+#Stems WPushButton,
+#KeyShiftInfo {
+  background-color: #1b1e24;
+  background-image: none;
+  border: 1px solid #6d8591;
+  border-radius: 2px;
+  color: #f0f3f6;
+  font-size: 25px;
+  font-weight: 600;
 }
 
-#Beatloop WPushButton[value="1"],  #Stems WPushButton[value="1"]{
-  background-image: url(skin:icons/button-loop.png);
-  background-repeat: repeat-xy;
-  color:#fff;
-
+#HotCues WPushButton[value="1"],
+#Beatloop WPushButton[value="1"],
+#KeyShift WPushButton[value="1"],
+#Stems WPushButton[value="1"],
+#KeyShiftInfo WPushButton[value="1"] {
+  background-color: #17343d;
+  background-image: none;
+  border: 1px solid #00e5ff;
+  color: #ffffff;
 }
 
-
-#HotCues WPushButton[value="1"], #KeyShift WPushButton[value="1"], #KeyShiftInfo WPushButton[value="1"]{
-  background-color: #efefefff;
-  border:none;
-  font-weight:400;
+/* Beatjump direction is a vector asset, not a font/emoji glyph.  The button
+   frame and state remain owned by QSS, while the SVG stays transparent. */
+#HotCues #BeatJumpBackward,
+#HotCues #BeatJumpForward {
+  background-color: #1b1e24;
+  background-repeat: no-repeat;
+  background-position: center center;
+  border: 1px solid #6d8591;
+  border-radius: 2px;
+  padding: 0;
+  font-size: 25px;
+  qproperty-alignment: 'AlignCenter';
 }
-#HotCues WPushButton, #KeyShiftInfo, #Stems WPushButton{
-  border: 2px solid #c0ccba;
-  font-weight:800;
+
+#HotCues #BeatJumpBackward {
+  background-image: url(skin:icons/beatjump-backward.png);
 }
 
-#HotCues WPushButton, #KeyShift WPushButton{
-  font-size:25px;
-  font-weight:bold;
-  color: #fff;
+#HotCues #BeatJumpForward {
+  background-image: url(skin:icons/beatjump-forward.png);
+}
+
+#HotCues #BeatJumpBackward[value="1"],
+#HotCues #BeatJumpForward[value="1"] {
+  background-color: #17343d;
+  border-color: #00e5ff;
+  color: #ffffff;
 }
 
 #Stems WPushButton{
   font-size:20px;
-  font-weight:400;
+  font-weight:600;
   color:#fff;
 }
 
+
+#RightButtons #ZedWifiButton {
+  background-color:#10191f;
+  color:#32dbe4;
+  border:1px solid #29454e;
+  border-radius:4px;
+  font-size:17px;
+  font-weight:600;
+}
+#RightButtons #ZedWifiButton[pressed="true"] { background-color:#09565d; }
+#RightButtons #ZedWifiButton[value="1"] { color:#39e875; }
 
 #SeparadorKey{
   background-image: url(skin:icons/keyshiftseparator.png);

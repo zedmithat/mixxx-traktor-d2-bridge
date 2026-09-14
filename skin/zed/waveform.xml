@@ -1,6 +1,10 @@
 <Template>
   <WidgetGroup>
     <ObjectName>Waveform_Channel<Variable name="channel"/></ObjectName>
+    <Connection>
+      <ConfigKey>[Skin],wifi_waveform_enabled</ConfigKey>
+      <BindProperty>enabled</BindProperty>
+    </Connection>
     <Layout>vertical</Layout>
     <Size>0me,50me</Size>
     <Children>

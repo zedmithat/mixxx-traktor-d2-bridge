@@ -21,97 +21,59 @@
               </Children>
               </WidgetGroup>
               
-              <!-- Selects which deck the performance pages operate on. -->
               <PushButton>
                 <ObjectName>DeckFocus</ObjectName>
-                <Size>58f,60f</Size>
+                <Size>48f,60f</Size>
                 <NumberStates>2</NumberStates>
-                <State><Number>0</Number><Text>DECK&#xA;1</Text></State>
-                <State><Number>1</Number><Text>DECK&#xA;2</Text></State>
+                <State><Number>0</Number><Text>1</Text></State>
+                <State><Number>1</Number><Text>2</Text></State>
                 <Connection><ConfigKey>[Skin],active_deck</ConfigKey></Connection>
               </PushButton>
-
-            <!--Bloc segona columna-->
-            <WidgetGroup>
-              <ObjectName>TrackMetadata</ObjectName>
-              <Layout>horizontal</Layout>
-              <Size>3s,60f</Size>
-              <Children>
-
-            <!--SEGONA COLUMNA AMB ARTWORK-->
-                              <CoverArt>
-                                                  <Pos>0,0</Pos>
-                                                  <TooltipId>coverart</TooltipId>
-                                                  <ObjectName>DeckCoverArt</ObjectName>
-                                                  <Size>60f,50f</Size>
-                                                  <Channel>1</Channel>
-                                                </CoverArt>
-                                <!--TERCERA COLUMNA QUE CONTÉ 2 FILES-->
-
-                                <WidgetGroup>
-                                <ObjectName>TrackInfo</ObjectName>
-                                <Layout>vertical</Layout>
-                                <Size>me,60f</Size>
-                                <Children>
-                                <!--Títol de la Cançó-->
-                                  <TrackProperty>
-                                      <ObjectName>TitleText</ObjectName>
-                                    <Size>me,30f</Size>
-                                      <TooltipId>track_title</TooltipId>
-                                      <Property>titleInfo</Property>
-                                      <Alignment>Left</Alignment>
-                                      <Elide>right</Elide>
-                                      <Channel>1</Channel>
-                                      <Connection>
-                                        <ConfigKey><Variable name="Group"/>,track_loaded</ConfigKey>
-                                        <BindProperty>highlight</BindProperty>
-                                      </Connection>
-                                    </TrackProperty>
-
-                                    <WidgetGroup>
-                                    <ObjectName>TrackSubInfo</ObjectName>
-                                    <Layout>horizontal</Layout>
-                                    <Size>me,30f</Size>
-                                    <LayoutAlignment>left</LayoutAlignment>
-                                    <Children>
-
-
-                                        <!--Artista-->
-
-                                        <TrackProperty>
-                                            <ObjectName>ArtistText</ObjectName>
-                                            <Size>me,30f</Size>
-                                            <TooltipId>track_artist</TooltipId>
-                                            <Property>artist</Property>
-                                            <Elide>right</Elide>
-                                            <Channel>1</Channel>
-                                            <Connection>
-                                              <ConfigKey><Variable name="Group"/>,track_loaded</ConfigKey>
-                                              <BindProperty>highlight</BindProperty>
-                                            </Connection>
-                                          </TrackProperty>
-
-                                          <!--Duració-->
-                                          <TrackProperty>
-                                              <ObjectName>DurationText</ObjectName>
-                                              <Size>me,30f</Size>
-                                              <TooltipId>track_duration</TooltipId>
-                                              <Alignment>Left</Alignment>
-                                              <Property>durationTextSeconds</Property>
-                                              <Channel>1</Channel>
-                                          </TrackProperty>
-
-                                      </Children>
-                                      </WidgetGroup>
-                            
-                                </Children>
-                                </WidgetGroup>
-
-
-                                
-                
+              <WidgetStack currentpage="[Skin],active_deck">
+                <ObjectName>TopbarCoverStack</ObjectName>
+                <Size>60f,60f</Size>
+                <Children>
+                  <WidgetGroup>
+                    <Layout>horizontal</Layout>
+                    <Children>
+                      <CoverArt>
+                        <ObjectName>DeckCoverArt</ObjectName>
+                        <TooltipId>coverart</TooltipId>
+                        <Size>60f,60f</Size>
+                        <Channel>1</Channel>
+                      </CoverArt>
+                    </Children>
+                  </WidgetGroup>
+                  <WidgetGroup trigger="[Skin],active_deck">
+                    <Layout>horizontal</Layout>
+                    <Children>
+                      <CoverArt>
+                        <ObjectName>DeckCoverArt</ObjectName>
+                        <TooltipId>coverart</TooltipId>
+                        <Size>60f,60f</Size>
+                        <Channel>2</Channel>
+                      </CoverArt>
+                    </Children>
+                  </WidgetGroup>
                 </Children>
-                </WidgetGroup>
+              </WidgetStack>
+              <WidgetStack currentpage="[Skin],active_deck">
+                <ObjectName>TopbarTrackStack</ObjectName>
+                <Size>3s,60f</Size>
+                <Children>
+                  <Template src="skin:topbar_trackinfo.xml">
+                    <SetVariable name="channel">1</SetVariable>
+                  </Template>
+                  <WidgetGroup trigger="[Skin],active_deck">
+                    <Layout>horizontal</Layout>
+                    <Children>
+                      <Template src="skin:topbar_trackinfo.xml">
+                        <SetVariable name="channel">2</SetVariable>
+                      </Template>
+                    </Children>
+                  </WidgetGroup>
+                </Children>
+              </WidgetStack>
 
 
             <!--Botons part dreta-->
@@ -193,8 +155,24 @@
                   </Template>
               </Children>
               </WidgetGroup>
+              <WidgetGroup><Size>8f,60f</Size></WidgetGroup>
+              <PushButton>
+                <ObjectName>ZedWifiButton</ObjectName>
+                <Size>68f,60f</Size>
+                <NumberStates>2</NumberStates>
+                <State><Number>0</Number><Text>WI-FI</Text></State>
+                <State><Number>1</Number><Text>WI-FI</Text></State>
+                <Connection>
+                  <ConfigKey>[Skin],wifi_settings</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+                <Connection>
+                  <ConfigKey>[Skin],wifi_connected</ConfigKey>
+                  <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                  <ConnectValueToWidget>true</ConnectValueToWidget>
+                </Connection>
+              </PushButton>
 
-              
                     
                 
                   </Children>

@@ -21,11 +21,11 @@
             <NumberStates>2</NumberStates>
             <State>
               <Number>0</Number>
-              <Text>DECK <Variable name="deck_label"/> OFF</Text>
+              <Text>DECK <Variable name="deck_label"/></Text>
             </State>
             <State>
               <Number>1</Number>
-              <Text>DECK <Variable name="deck_label"/> ON</Text>
+              <Text>DECK <Variable name="deck_label"/></Text>
             </State>
             <Connection>
               <ConfigKey>[EffectRack1_EffectUnit<Variable name="unit"/>],group_[Channel<Variable name="channel"/>]_enable</ConfigKey>
