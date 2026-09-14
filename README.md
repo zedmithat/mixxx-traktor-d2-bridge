@@ -4,6 +4,43 @@
 
 An experimental Linux integration for using two Native Instruments Traktor Kontrol D2 units with Mixxx. It combines a libctlra-based hardware bridge, a 480x272 RGB565 player/browser renderer, Mixxx controller mappings, selected Mixxx source patches, and the custom two-deck `zed` skin derived from XDJ100SX.
 
+## September 2026 update
+
+The current two-deck ZED installation adds:
+
+- X/Y Touch FX macros with parameter routing, an amount slider, momentary/latch,
+  FX OFF and Reset FX, while retaining the external-mixer workflow.
+- Filter Echo, Filter Reverb, Filter Roll/Glitch, LFO Echo, Filter Dub Echo,
+  Filter Gate/Tremolo, Noise Gate/Tremolo, Flanger, LFO Filter and Filter
+  approximations built from Mixxx effects, not another product's DSP.
+- English/Turkish first setup, country/time zone, Wi-Fi progression and ALSA
+  audio-device/output selection (not certification of every mixer model).
+- Restored cover art with the deck selector on its left, touch-friendly setup
+  controls and device-settings navigation fixes.
+
+See the [current update and delivery details](docs/SEPTEMBER-2026-UPDATE.md).
+The [Touch FX source overlay](integrations/touch-fx-source/README.md) contains the
+application, XML/JS mappings, integration code and regression tests.
+The owner's personal NVMe installation works. A verified local delivery package
+contains the accepted clean image, corresponding sources and notices; an OS
+image download has not been published in this repository.
+
+### Touch FX — Filter Echo
+
+![Touch FX Filter Echo, offline PyQt preview with simulated MIDI](docs/images/touchfx-filter-echo-20260913.png)
+
+### Touch FX — Flanger
+
+![Touch FX Flanger, offline PyQt preview with simulated MIDI](docs/images/touchfx-flanger-20260913.png)
+
+### Turkish first setup
+
+![Turkish first-setup offline preview](docs/images/setup-turkish-20260913.png)
+
+These are actual offline UI captures, not live Pi audio-test screenshots or
+complete current-player screenshots. Touch FX captures retain their dry-run
+label. The older player captures below document earlier skin states.
+
 ## Screenshots
 
 ### Traktor D2 player
@@ -23,7 +60,7 @@ toolbar or the D2 Browse `R1` menu.
 
 ![Traktor D2 480x272 Smart Lists framebuffer](docs/d2-smart-lists.png)
 
-### Mixxx zed two-deck player skin
+### Mixxx zed two-deck player skin (earlier capture)
 
 ![Live Mixxx zed two-deck player skin with per-deck FX units](docs/zed-main-screen-live.png)
 
